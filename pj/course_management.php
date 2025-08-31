@@ -127,6 +127,7 @@ if (isset($_GET['export'])) {
   if ($what === 'courses') {
     fputcsv($out, ['course_code','course_name','credits','faculty_value','major_value','program_value','curriculum_name_value','curriculum_year_value']);
     $rs = $pdo->query("SELECT course_code,course_name,credits,faculty_value,major_value,program_value,curriculum_name_value,curriculum_year_value FROM courses ORDER BY course_code");
+
     while ($r = $rs->fetch(PDO::FETCH_NUM)) fputcsv($out, $r);
     fclose($out); exit;
   }
@@ -428,7 +429,7 @@ if ($view === 'options') {
   $opts_types = [
     'faculty' => 'คณะ', 'major' => 'สาขา', 'program' => 'สาขาวิชา', 'student_group' => 'กลุ่มนักศึกษา',
     'education_level' => 'ระดับการศึกษา', 'program_type' => 'ประเภทหลักสูตร', 'curriculum_name' => 'หลักสูตร',
-    'curriculum_year' => 'ปีของหลักสูตร', 'student_status'  => 'สถานะ', 'education_term' => 'ภาคการศึกษา', 'education_year' => 'ปีการศึกษา',
+    'curriculum_year' => 'ปีของหลักสูตร', 'education_term' => 'ภาคการศึกษา', 'education_year' => 'ปีการศึกษา',
   ];
   $all_opts = $pdo->query("SELECT * FROM form_options ORDER BY type, parent_value, label")->fetchAll(PDO::FETCH_ASSOC);
   $grouped_opts = [];
@@ -557,7 +558,12 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
         <div class="form-field">
           <label for="csv">นำเข้า CSV (course_code,course_name,credits)</label>
           <div class="form-field" style="margin-bottom:0;">
-  <label>ชื่อหลักสูตร (ผูกให้ทุกแถว)</label>
+          <input id="csv" name="csv" type="file" class="input" accept=".csv,text/csv" required>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+            <input type="checkbox" name="has_header" value="1" style="width:auto"> ไฟล์มีแถวหัวตาราง (Header)
+          </label>
+        </div>
+<label>ชื่อหลักสูตร (ผูกให้ทุกแถว)</label>
   <select name="curriculum_name_value" class="select">
     <option value="">— ไม่ระบุ —</option>
     <?php foreach($curNames as $cn): ?>
@@ -574,13 +580,6 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
     <?php endforeach; ?>
   </select>
 </div>
-
-          <input id="csv" name="csv" type="file" class="input" accept=".csv,text/csv" required>
-          <label style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-            <input type="checkbox" name="has_header" value="1" style="width:auto"> ไฟล์มีแถวหัวตาราง (Header)
-          </label>
-        </div>
-
         <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
           <div class="form-field" style="margin-bottom:0;"><label>คณะ (ผูกให้ทุกแถว)</label><select name="faculty_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($faculties as $f): ?><option value="<?php echo e($f['id']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
           <div class="form-field" style="margin-bottom:0;"><label>สาขา (ผูกให้ทุกแถว)</label><select name="major_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($majors as $m): ?><option value="<?php echo e($m['id']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>

@@ -201,7 +201,7 @@ function h($str) { return htmlspecialchars($str, ENT_QUOTES, 'UTF-8'); }
 
             <div style="margin-top:16px;">
                 <button type="submit" class="btn">บันทึกอาจารย์</button>
-                <a href="View_teacher.php" class="btn" style="background:transparent; color:#e5e7eb;">ยกเลิก</a>
+                <a href="teacher_registration.php" class="btn" style="background:transparent; color:#e5e7eb;">ยกเลิก</a>
             </div>
         </form>
     </div>

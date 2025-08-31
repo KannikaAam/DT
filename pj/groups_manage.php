@@ -1,4 +1,4 @@
-<?php
+<?php 
 // groups_manage.php — จัดการกลุ่มเรียน (เชื่อม education_info.student_group & curriculum_name)
 session_start();
 if (empty($_SESSION['loggedin'])) { header('Location: login.php?error=unauthorized'); exit; }
@@ -58,22 +58,51 @@ function studentCodeExpr(PDO $pdo){
   return "CAST(s.student_id AS CHAR)";
 }
 
+/* ===== Flexible form_options helpers (auto-detect columns) ===== */
+function fo_detect_cols(PDO $pdo){
+  $st = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='form_options'");
+  $st->execute();
+  $cols = $st->fetchAll(PDO::FETCH_COLUMN);
+
+  $valueCandidates = ['value','option_value','val','code','key','id'];
+  $labelCandidates = ['label','name','text','option_label','title','display_name'];
+
+  $valueCol = null; foreach($valueCandidates as $c){ if (in_array($c,$cols,true)){ $valueCol=$c; break; } }
+  $labelCol = null; foreach($labelCandidates as $c){ if (in_array($c,$cols,true)){ $labelCol=$c; break; } }
+  if (!$labelCol && $valueCol){ $labelCol = $valueCol; }
+
+  $hasActive = in_array('is_active',$cols,true);
+  $hasSort   = in_array('sort_order',$cols,true);
+  $hasType   = in_array('type',$cols,true);
+
+  return [$valueCol,$labelCol,$hasActive,$hasSort,$hasType];
+}
+function fo_fetch_by_type(PDO $pdo, string $type){
+  list($val,$lab,$hasActive,$hasSort,$hasType) = fo_detect_cols($pdo);
+  if (!$val){ return []; }
+
+  $sql = "SELECT {$val} AS value, {$lab} AS label FROM form_options";
+  $where = [];
+  $params = [];
+
+  if ($hasType){ $where[]="type=?"; $params[]=$type; }
+  if ($hasActive){ $where[]="is_active=1"; }
+  if ($where){ $sql .= " WHERE ".implode(" AND ", $where); }
+  $sql .= $hasSort ? " ORDER BY sort_order, label" : " ORDER BY label";
+
+  $st = $pdo->prepare($sql);
+  $st->execute($params);
+  return $st->fetchAll(PDO::FETCH_ASSOC);
+}
+function curriculumOptions(PDO $pdo){ return fo_fetch_by_type($pdo, 'curriculum_name'); }
+function groupNameOptions(PDO $pdo){ return fo_fetch_by_type($pdo, 'student_group'); }
+
 /* ===== Data helpers ===== */
-function curriculumOptions(PDO $pdo){
-  return $pdo->query("SELECT value,label FROM form_options
-                      WHERE type='curriculum_name' AND is_active=1
-                      ORDER BY sort_order, label")->fetchAll(PDO::FETCH_ASSOC);
-}
-function groupNameOptions(PDO $pdo){
-  return $pdo->query("SELECT value,label FROM form_options
-                      WHERE type='student_group' AND is_active=1
-                      ORDER BY sort_order, label")->fetchAll(PDO::FETCH_ASSOC);
-}
 function teachersList(PDO $pdo){
   return $pdo->query("SELECT teacher_id, name AS teacher_name FROM teacher ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 }
 function groupsByCurriculum(PDO $pdo, $cur, $is_admin, $is_teacher, $uid){
-  // นับ นศ. จาก education_info (ผูกด้วย curriculum_name + student_group)
   $base="SELECT cg.*,
                t.name AS teacher_name,
                (SELECT COUNT(*) FROM education_info ei
@@ -91,7 +120,6 @@ function groupSignature(PDO $pdo, $group_id){
   $st->execute([$group_id]); return $st->fetch(PDO::FETCH_ASSOC) ?: null;
 }
 function roster(PDO $pdo, $group_id, $is_admin, $is_teacher, $uid){
-  // ถ้าเป็นครู ต้องเป็นเจ้าของกลุ่ม
   if ($is_teacher){
     $chk=$pdo->prepare("SELECT 1 FROM course_groups WHERE group_id=? AND teacher_id=?");
     $chk->execute([$group_id,$uid]); if(!$chk->fetchColumn()) return [];
@@ -102,8 +130,8 @@ function roster(PDO $pdo, $group_id, $is_admin, $is_teacher, $uid){
                ei.status, ei.created_at AS enrollment_date
         FROM education_info ei
         INNER JOIN students s ON s.student_id=ei.student_id
-        WHERE ei.curriculum_name=? AND ei.student_group=?
-        ORDER BY student_name";
+        WHERE ei.curriculum_name=? AND ei.student_group=?"
+        ." ORDER BY student_name";
   $st=$pdo->prepare($sql); $st->execute([$sig['curriculum_value'],$sig['group_name']]);
   return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
@@ -203,7 +231,6 @@ if (isset($_GET['ajax'])){
   }
 
   if ($ajax==='student_options'){
-    // แสดงรายชื่อนศ.ในหลักสูตรนั้นที่ยังไม่ได้อยู่ในกลุ่มนี้ (education_info.student_group != group_name)
     header('Content-Type: text/html; charset=utf-8');
     if(!$is_admin){ echo 'permission denied'; exit; }
     $gid=(int)($_GET['group_id'] ?? 0);
@@ -254,7 +281,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     $group_id     =(int)($_POST['group_id'] ?? 0);
     $cur          =trim($_POST['curriculum_value'] ?? '');
     $group_name   =trim($_POST['group_name'] ?? '');
-    $teacher_id   =trim($_POST['teacher_id'] ?? ''); // string ได้
+    $teacher_id   =trim($_POST['teacher_id'] ?? '');
     $max_students =(int)($_POST['max_students'] ?? 40);
 
     $errs=[];
@@ -273,7 +300,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
       $ins->execute([$cur,$group_name,$teacher_id,$max_students]);
       flash('ok','เพิ่มกลุ่มเรียนแล้ว');
     }else{
-      // ห้ามลดต่ำกว่าจำนวนนศ.ปัจจุบันใน education_info
       $cnt=$pdo->prepare("SELECT COUNT(*) FROM education_info WHERE curriculum_name=? AND student_group=?");
       $cnt->execute([$cur,$group_name]); $curCount=(int)$cnt->fetchColumn();
       if ($max_students < $curCount){
@@ -301,7 +327,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     if(!$ids){ flash('danger','โปรดเลือกนักศึกษา'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
     $sig=groupSignature($pdo,$gid); if(!$sig){ flash('danger','ไม่พบกลุ่ม'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
 
-    // ตรวจ capacity จาก education_info
     $cnt=$pdo->prepare("SELECT COUNT(*) FROM education_info WHERE curriculum_name=? AND student_group=?");
     $cnt->execute([$sig['curriculum_value'],$sig['group_name']]); $curCount=(int)$cnt->fetchColumn();
     $avail=max(0, (int)$sig['max_students'] - $curCount);
@@ -310,10 +335,8 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     foreach($ids as $sid){
       if($avail<=0) break;
       $sid=(int)$sid; if($sid<=0) continue;
-      // ข้ามถ้าอยู่กลุ่มนี้อยู่แล้ว
       $ck=$pdo->prepare("SELECT 1 FROM education_info WHERE student_id=? AND curriculum_name=? AND student_group=?");
       $ck->execute([$sid,$sig['curriculum_value'],$sig['group_name']]); if($ck->fetchColumn()) continue;
-      // ย้ายเข้ากลุ่ม (อัปเดตแถวของหลักสูตรนั้น)
       $up=$pdo->prepare("UPDATE education_info SET student_group=? WHERE student_id=? AND curriculum_name=?");
       $up->execute([$sig['group_name'],$sid,$sig['curriculum_value']]);
       if($up->rowCount()>0){ $added++; $avail--; }
@@ -327,7 +350,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     $sid=(int)($_POST['student_id'] ?? 0);
     $sig=groupSignature($pdo,$gid);
     if($sig){
-      // เอาออก = เซ็ตกลุ่มเป็น NULL ใน education_info สำหรับหลักสูตรนั้น
       $pdo->prepare("UPDATE education_info SET student_group=NULL WHERE student_id=? AND curriculum_name=?")
           ->execute([$sid,$sig['curriculum_value']]);
       flash('ok','นำออกจากกลุ่มแล้ว');
@@ -569,7 +591,7 @@ function openEditGroup(id, curVal, name, teacher_id, max_stu){
   $('gm_group_id').value=id;
   $('gm_curriculum').value=curVal || '';
   $('gm_teacher_id').value=teacher_id || '';
-  $('gm_max').value=max_stu || 40;
+  $('gm_max').value=Number(max_stu) || 40;
   const sel=$('gm_group_name');
   if (![...sel.options].some(o=>o.value===name)) sel.add(new Option(name,name));
   sel.value=name;
