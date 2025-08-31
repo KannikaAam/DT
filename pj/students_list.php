@@ -1,5 +1,5 @@
 <?php
-// students_list.php (with recommendations: groups + courses + curriculum)
+// students_list.php (FULL) — index + clickable name -> detail + robust attempts + recommendations
 session_start();
 if (empty($_SESSION['loggedin']) || (($_SESSION['user_type'] ?? '') !== 'admin')) {
   header('Location: login.php?error=unauthorized'); exit;
@@ -20,9 +20,11 @@ function hasColumn(PDO $pdo, string $table, string $col): bool {
 /* ---------- Detect schema variants ---------- */
 $hasSubjectGroupsTable = hasTable($pdo,'subject_groups');
 $hasGroupIdOnEducation = hasColumn($pdo,'education_info','group_id');
-$enableGroupFilter      = ($hasSubjectGroupsTable && $hasGroupIdOnEducation);
+$enableGroupFilter     = ($hasSubjectGroupsTable && $hasGroupIdOnEducation);
 
-$hasStudentRecs = hasTable($pdo, 'student_recommendations') && hasColumn($pdo,'student_recommendations','student_id') && hasColumn($pdo,'student_recommendations','group_id');
+$hasStudentRecs = hasTable($pdo, 'student_recommendations')
+  && hasColumn($pdo,'student_recommendations','student_id')
+  && hasColumn($pdo,'student_recommendations','group_id');
 
 /* Pick group-course mapping table + key style */
 $gcTables = [
@@ -46,11 +48,21 @@ foreach($gcTables as $cand){
 $courses = [];
 $courseById = []; $courseByCode=[];
 if (hasTable($pdo,'courses')){
-  $rows = $pdo->query("SELECT id,course_code,course_name,curriculum_name_value,curriculum_year_value FROM courses")->fetchAll(PDO::FETCH_ASSOC);
-  foreach($rows as $r){
-    $courses[] = $r;
-    $courseById[(string)$r['id']]     = $r;
-    $courseByCode[(string)$r['course_code']] = $r;
+  $courseCols = [];
+  if (hasColumn($pdo,'courses','id')) $courseCols[] = 'id';
+  if (hasColumn($pdo,'courses','course_code')) $courseCols[] = 'course_code';
+  if (hasColumn($pdo,'courses','course_name')) $courseCols[] = 'course_name';
+  if (hasColumn($pdo,'courses','curriculum_name_value')) $courseCols[] = 'curriculum_name_value';
+  if (hasColumn($pdo,'courses','curriculum_year_value')) $courseCols[] = 'curriculum_year_value';
+
+  if (!empty($courseCols)) {
+    $sql = "SELECT ".implode(',', $courseCols)." FROM courses";
+    $rowsC = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    foreach($rowsC as $r){
+      $courses[] = $r;
+      if (isset($r['id']))          { $courseById[(string)$r['id']] = $r; }
+      if (isset($r['course_code'])) { $courseByCode[(string)$r['course_code']] = $r; }
+    }
   }
 }
 /* form_options map for curriculum labels */
@@ -82,18 +94,32 @@ if ($gcTable){
     }
     if ($rec){
       $groupCourses[$gid][] = [
-        'course_code' => $rec['course_code'],
-        'course_name' => $rec['course_name'],
-        'cur_name'    => $rec['curriculum_name_value'] ? ($optLabel[(string)$rec['curriculum_name_value']] ?? null) : null,
-        'cur_year'    => $rec['curriculum_year_value'] ? ($optLabel[(string)$rec['curriculum_year_value']] ?? null) : null,
+        'course_code' => $rec['course_code'] ?? '',
+        'course_name' => $rec['course_name'] ?? '',
+        'cur_name'    => !empty($rec['curriculum_name_value']) ? ($optLabel[(string)$rec['curriculum_name_value']] ?? null) : null,
+        'cur_year'    => !empty($rec['curriculum_year_value']) ? ($optLabel[(string)$rec['curriculum_year_value']] ?? null) : null,
       ];
     }
   }
 }
 
+/* Fallback: ถ้าไม่เจอ $gcTable แต่มีตาราง subjects ให้ใช้รายวิชาในกลุ่ม */
+if (!$gcTable && hasTable($pdo,'subjects')) {
+  $stmt = $pdo->query("SELECT group_id, subject_name FROM subjects ORDER BY subject_name");
+  while($r = $stmt->fetch(PDO::FETCH_ASSOC)){
+    $gid = (string)$r['group_id'];
+    $groupCourses[$gid][] = [
+      'course_code' => '',
+      'course_name' => $r['subject_name'],
+      'cur_name'    => null,
+      'cur_year'    => null,
+    ];
+  }
+}
+
 /* ---------- Filters ---------- */
 $q        = trim($_GET['q'] ?? '');
-$gFilter  = trim($_GET['group'] ?? '');        // only used if $enableGroupFilter
+$gFilter  = trim($_GET['group'] ?? '');
 $ast      = trim($_GET['academic_status'] ?? '');
 $quiz     = trim($_GET['quiz_state'] ?? '');
 $page     = max(1, (int)($_GET['page'] ?? 1));
@@ -101,10 +127,17 @@ $per_page = 20; $offset = ($page-1)*$per_page;
 
 $where = []; $params = [];
 
+// รวมจำนวนครั้งจากหลายแหล่ง
+$attemptExpr = "GREATEST(
+  COALESCE(sqs.quiz_attempts,0),
+  COALESCE(th.attempts,0),
+  COALESCE(qr.attempts,0)
+)";
+
 if ($q !== '') { $where[]="(ei.student_id LIKE :kw OR pi.full_name LIKE :kw)"; $params[':kw']="%{$q}%"; }
 if ($ast !== ''){ $where[]="COALESCE(sqs.academic_status,'active') = :ast"; $params[':ast']=$ast; }
-if ($quiz==='did') { $where[]="COALESCE(sqs.quiz_attempts,0) > 0"; }
-elseif ($quiz==='not') { $where[]="COALESCE(sqs.quiz_attempts,0) = 0"; }
+if ($quiz==='did') { $where[]="$attemptExpr > 0"; }
+elseif ($quiz==='not') { $where[]="$attemptExpr = 0"; }
 
 if ($enableGroupFilter && $gFilter!==''){
   if (ctype_digit($gFilter)) { $where[]="ei.group_id = :gid"; $params[':gid']=$gFilter; }
@@ -114,6 +147,19 @@ $wh = $where ? ('WHERE '.implode(' AND ',$where)) : '';
 
 $joinGroup = $enableGroupFilter ? "LEFT JOIN subject_groups sg ON ei.group_id = sg.group_id" : "";
 
+// ซับเควรีนับ attempts จาก test_history และ quiz_results
+$joinTH = "LEFT JOIN (
+    SELECT username AS sid, COUNT(*) AS attempts
+    FROM test_history
+    GROUP BY username
+  ) th ON th.sid = ei.student_id";
+
+$joinQR = "LEFT JOIN (
+    SELECT CAST(student_id AS CHAR) AS sid, COUNT(*) AS attempts
+    FROM quiz_results
+    GROUP BY CAST(student_id AS CHAR)
+  ) qr ON qr.sid = ei.student_id";
+
 /* ---------- Count ---------- */
 $sqlCount = "
   SELECT COUNT(*)
@@ -121,6 +167,8 @@ $sqlCount = "
   INNER JOIN personal_info pi ON pi.id = ei.personal_id
   LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
   $joinGroup
+  $joinTH
+  $joinQR
   $wh
 ";
 $pc = $pdo->prepare($sqlCount); $pc->execute($params);
@@ -129,6 +177,7 @@ $total = (int)$pc->fetchColumn(); $total_pages = max(1, (int)ceil($total/$per_pa
 /* ---------- Page list ---------- */
 $selectGroupName = $enableGroupFilter ? "sg.group_name," : "NULL AS group_name,";
 $selectGroupId   = $hasGroupIdOnEducation ? "ei.group_id," : "NULL AS group_id,";
+$selectComputed  = "$attemptExpr AS computed_attempts,";
 
 $sqlList = "
   SELECT
@@ -138,12 +187,15 @@ $sqlList = "
     $selectGroupName
     COALESCE(sqs.academic_status,'active') AS academic_status,
     COALESCE(sqs.quiz_attempts,0) AS quiz_attempts,
+    $selectComputed
     COALESCE(sqs.recommended_count,0) AS recommended_count,
     COALESCE(sqs.admin_override_attempts,0) AS admin_override_attempts
   FROM education_info ei
   INNER JOIN personal_info pi ON pi.id = ei.personal_id
   LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
   $joinGroup
+  $joinTH
+  $joinQR
   $wh
   ORDER BY ei.student_id
   LIMIT :lim OFFSET :off
@@ -157,11 +209,12 @@ $rows = $ps->fetchAll(PDO::FETCH_ASSOC);
 
 /* ---------- Load student->recommended groups (if table exists) ---------- */
 $studentGroups = []; // student_id => [group_id,...]
-if ($hasStudentRecs){
-  $st = $pdo->prepare("SELECT student_id, group_id FROM student_recommendations WHERE student_id IN (".
-                      implode(',', array_fill(0,count($rows),'?')).")");
-  $ids = array_map(fn($r)=>$r['student_id'],$rows);
-  if ($ids){
+if ($hasStudentRecs && !empty($rows)){
+  $ids = array_values(array_unique(array_map(fn($r)=>$r['student_id'],$rows)));
+  if (!empty($ids)) {
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $sql = "SELECT student_id, group_id FROM student_recommendations WHERE student_id IN ($placeholders)";
+    $st  = $pdo->prepare($sql);
     $st->execute($ids);
     while($r = $st->fetch(PDO::FETCH_ASSOC)){
       $studentGroups[$r['student_id']][] = (string)$r['group_id'];
@@ -189,24 +242,94 @@ function buildRecommendSummary(array $row, array $studentGroups, bool $hasStuden
   return $out;
 }
 
+/* ---------- AJAX: quiz_detail (click name) ---------- */
+if (isset($_GET['ajax']) && $_GET['ajax']==='quiz_detail') {
+  header('Content-Type: application/json; charset=utf-8');
+  $sid = trim($_GET['sid'] ?? '');
+  if ($sid===''){ echo json_encode(['ok'=>false,'error'=>'missing sid'], JSON_UNESCAPED_UNICODE); exit; }
+
+  $selGroupName = $enableGroupFilter ? "sg.group_name," : "NULL AS group_name,";
+  $selGroupId   = $hasGroupIdOnEducation ? "ei.group_id," : "NULL AS group_id,";
+  $sql = "
+    SELECT
+      ei.student_id,
+      $selGroupId
+      pi.full_name,
+      $selGroupName
+      COALESCE(sqs.academic_status,'active') AS academic_status,
+      GREATEST(
+        COALESCE(sqs.quiz_attempts,0),
+        COALESCE(th.attempts,0),
+        COALESCE(qr.attempts,0)
+      ) AS computed_attempts,
+      COALESCE(sqs.recommended_count,0) AS recommended_count,
+      COALESCE(sqs.admin_override_attempts,0) AS admin_override_attempts
+    FROM education_info ei
+    INNER JOIN personal_info pi ON pi.id = ei.personal_id
+    LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
+    ".($enableGroupFilter ? "LEFT JOIN subject_groups sg ON ei.group_id=sg.group_id" : "")."
+    LEFT JOIN (
+      SELECT username AS sid, COUNT(*) AS attempts
+      FROM test_history
+      GROUP BY username
+    ) th ON th.sid = ei.student_id
+    LEFT JOIN (
+      SELECT CAST(student_id AS CHAR) AS sid, COUNT(*) AS attempts
+      FROM quiz_results
+      GROUP BY CAST(student_id AS CHAR)
+    ) qr ON qr.sid = ei.student_id
+    WHERE ei.student_id = :sid
+    LIMIT 1
+  ";
+  $st = $pdo->prepare($sql);
+  $st->execute([':sid'=>$sid]);
+  $row = $st->fetch(PDO::FETCH_ASSOC);
+  if (!$row){ echo json_encode(['ok'=>false,'error'=>'not found'], JSON_UNESCAPED_UNICODE); exit; }
+
+  $sgids = [];
+  if ($hasStudentRecs){
+    $r = $pdo->prepare("SELECT group_id FROM student_recommendations WHERE student_id = ?");
+    $r->execute([$sid]);
+    $sgids = $r->fetchAll(PDO::FETCH_COLUMN);
+  }
+  $recs = buildRecommendSummary($row, [$sid=>$sgids], $hasStudentRecs, $hasGroupIdOnEducation, $groupCourses, $groupName);
+
+  echo json_encode([
+    'ok'=>true,
+    'student'=>[
+      'student_id'=>$row['student_id'],
+      'full_name'=>$row['full_name'],
+      'group_name'=>$row['group_name'] ?? null
+    ],
+    'stats'=>[
+      'academic_status'=>$row['academic_status'],
+      'quiz_attempts'=>(int)$row['computed_attempts'],
+      'recommended_count'=>(int)$row['recommended_count'],
+      'admin_override_attempts'=>(int)$row['admin_override_attempts'],
+    ],
+    'recs'=>$recs
+  ], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
 /* ---------- Export CSV ---------- */
 if (isset($_GET['export']) && $_GET['export']==='csv') {
   header('Content-Type: text/csv; charset=utf-8');
-  header('Content-Disposition: attachment; filename="students_'.date('Ymd_His').'.csv"');
+  header('Content-Disposition: attachment; filename=students_'.date('Ymd_His').'.csv');
   echo "\xEF\xBB\xBF";
   $out = fopen('php://output','w');
-  fputcsv($out, ['student_id','full_name','group','academic_status','quiz_attempts','recommended_count','admin_override_attempts','recommended_groups_and_courses']);
+  fputcsv($out, ['student_id','full_name','group','academic_status','quiz_attempts(computed)','recommended_count','admin_override_attempts','recommended_groups_and_courses']);
   foreach($rows as $r){
     $recs = buildRecommendSummary($r,$studentGroups,$hasStudentRecs,$hasGroupIdOnEducation,$groupCourses,$groupName);
-    // flatten summary
     $parts = [];
     foreach($recs as $rec){
       $codes = array_map(fn($c)=>$c['course_code'], array_slice($rec['courses'],0,5));
       $parts[] = $rec['gname'].' ('.count($rec['courses']).' วิชา: '.implode('|',$codes).')';
     }
+    $computed = (int)($r['computed_attempts'] ?? $r['quiz_attempts'] ?? 0);
     fputcsv($out, [
       $r['student_id'],$r['full_name'],$r['group_name'] ?? '',
-      $r['academic_status'],$r['quiz_attempts'],$r['recommended_count'],$r['admin_override_attempts'],
+      $r['academic_status'],$computed,$r['recommended_count'],$r['admin_override_attempts'],
       implode(' ; ',$parts)
     ]);
   }
@@ -259,15 +382,19 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
 .rec-btn{padding:6px 10px;border-radius:8px;background:var(--p2);border:1px solid var(--line);color:var(--text);cursor:pointer}
 .rec-btn:hover{border-color:var(--cyan);color:var(--cyan)}
 
-/* modal */
+/* modal (shared detail) */
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center;padding:16px}
-.modal-card{background:var(--p1);border:1px solid var(--line);border-radius:12px;max-width:720px;width:100%;box-shadow:0 12px 30px rgba(0,0,0,.3)}
+.modal-card{background:var(--p1);border:1px solid var(--line);border-radius:12px;max-width:820px;width:100%;box-shadow:0 12px 30px rgba(0,0,0,.3)}
 .modal-header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
 .modal-body{padding:12px 16px;max-height:70vh;overflow:auto}
 .close{background:transparent;border:1px solid var(--line);color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer}
 .close:hover{border-color:var(--danger);color:#fff;background:var(--danger)}
 .course-item{border-bottom:1px dashed rgba(255,255,255,.08);padding:8px 0}
 .course-item small{color:var(--muted)}
+
+.student-link{color:#9ee7f7;cursor:pointer;text-decoration:underline}
+.student-link:hover{color:#22d3ee}
+.idx-col{color:#9CA3AF}
 </style>
 </head>
 <body>
@@ -276,20 +403,25 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
     <div class="title"><i class="fas fa-users"></i> รายชื่อนักศึกษา</div>
     <div style="display:flex;gap:8px">
       <a class="btn" href="admin_dashboard.php"><i class="fas fa-home"></i> หน้าหลัก</a>
-      <a class="btn" href="?<?= http_build_query(array_merge($_GET,['export'=>'csv'])) ?>"><i class="fas fa-file-download"></i> ส่งออก CSV (ตามตัวกรอง)</a>
+      <?php
+        $exportLink = '?' . http_build_query(array_merge($_GET, ['export' => 'csv']));
+      ?>
+      <a class="btn" href="<?php echo htmlspecialchars($exportLink, ENT_QUOTES, 'UTF-8'); ?>">
+        <i class="fas fa-file-download"></i> ส่งออก CSV (ตามตัวกรอง)
+      </a>
     </div>
   </div>
 </header>
 
 <main class="container">
   <form class="filters" method="get">
-    <input class="input" type="text" name="q" placeholder="ค้นหา: รหัส/ชื่อ" value="<?= htmlspecialchars($q) ?>">
+    <input class="input" type="text" name="q" placeholder="ค้นหา: รหัส/ชื่อ" value="<?php echo htmlspecialchars($q, ENT_QUOTES, 'UTF-8'); ?>">
 
     <?php if ($enableGroupFilter): ?>
       <select class="select" name="group">
         <option value="">ทุกกลุ่ม</option>
         <?php foreach($groups as $gg): $sel = ((string)$gg['group_id']===$gFilter)?'selected':''; ?>
-          <option value="<?= $gg['group_id'] ?>" <?= $sel ?>><?= htmlspecialchars($gg['group_name']) ?></option>
+          <option value="<?php echo $gg['group_id']; ?>" <?php echo $sel; ?>><?php echo htmlspecialchars($gg['group_name'], ENT_QUOTES, 'UTF-8'); ?></option>
         <?php endforeach; ?>
       </select>
     <?php endif; ?>
@@ -301,8 +433,8 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
 
     <select class="select" name="quiz_state">
       <option value="">สถานะแบบทดสอบทั้งหมด</option>
-      <option value="did" <?= $quiz==='did'?'selected':'' ?>>ทำแล้ว</option>
-      <option value="not" <?= $quiz==='not'?'selected':'' ?>>ยังไม่ทำ</option>
+      <option value="did" <?php echo $quiz==='did'?'selected':''; ?>>ทำแล้ว</option>
+      <option value="not" <?php echo $quiz==='not'?'selected':''; ?>>ยังไม่ทำ</option>
     </select>
 
     <button class="btn btn-primary" type="submit"><i class="fas fa-search"></i> ค้นหา</button>
@@ -312,76 +444,53 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
     <table>
       <thead>
         <tr>
+          <th style="width:70px">ลำดับ</th>
           <th style="width:120px">รหัส</th>
           <th>ชื่อ-นามสกุล</th>
           <th style="width:200px">กลุ่ม</th>
           <th style="width:160px">สถานะนักศึกษา</th>
-          <th style="width:110px">ทำแบบทดสอบ</th>
+          <th style="width:130px">ทำแบบทดสอบ (ครั้ง)</th>
           <th style="width:120px">แนะนำสำเร็จ</th>
           <th style="width:120px">สิทธิ์เพิ่ม</th>
           <th style="width:220px"># แนะนำ</th>
         </tr>
       </thead>
       <tbody>
-        <?php if ($rows): foreach($rows as $r):
+        <?php if ($rows): $rowIdx=0; foreach($rows as $r):
           $cls = [
             'active'    =>'st-active','graduated'=>'st-graduated','leave'=>'st-leave','suspended'=>'st-suspended'
           ][$r['academic_status']] ?? 'st-active';
 
-          $recs = buildRecommendSummary($r,$studentGroups,$hasStudentRecs,$hasGroupIdOnEducation,$groupCourses,$groupName);
-          $rid  = htmlspecialchars($r['student_id']);
+          $recs  = buildRecommendSummary($r,$studentGroups,$hasStudentRecs,$hasGroupIdOnEducation,$groupCourses,$groupName);
+          $sid   = (string)$r['student_id'];
+          $rid   = htmlspecialchars($sid, ENT_QUOTES, 'UTF-8');
+          $order = $offset + (++$rowIdx);
+          $computedAttempts = (int)($r['computed_attempts'] ?? $r['quiz_attempts'] ?? 0);
         ?>
         <tr>
-          <td><?= htmlspecialchars($r['student_id']) ?></td>
-          <td><?= htmlspecialchars($r['full_name']) ?></td>
-          <td><?= htmlspecialchars($r['group_name'] ?? '-') ?></td>
-          <td><span class="badge <?= $cls ?>"><?= htmlspecialchars($asts[$r['academic_status']] ?? 'กำลังศึกษา') ?></span></td>
-          <td><?= (int)$r['quiz_attempts'] ?></td>
-          <td><?= (int)$r['recommended_count'] ?></td>
-          <td><?= (int)$r['admin_override_attempts'] ?></td>
+          <td class="idx-col"><?php echo $order; ?></td>
+          <td><?php echo htmlspecialchars($r['student_id'], ENT_QUOTES, 'UTF-8'); ?></td>
+          <td><a class="student-link" data-sid="<?php echo $rid; ?>"><?php echo htmlspecialchars($r['full_name'], ENT_QUOTES, 'UTF-8'); ?></a></td>
+          <td><?php echo htmlspecialchars($r['group_name'] ?? '-', ENT_QUOTES, 'UTF-8'); ?></td>
+          <td><span class="badge <?php echo $cls; ?>"><?php echo htmlspecialchars($asts[$r['academic_status']] ?? 'กำลังศึกษา', ENT_QUOTES, 'UTF-8'); ?></span></td>
+          <td><?php echo $computedAttempts; ?></td>
+          <td><?php echo (int)$r['recommended_count']; ?></td>
+          <td><?php echo (int)$r['admin_override_attempts']; ?></td>
           <td>
             <?php if ($recs): ?>
               <div class="rec-cell">
                 <?php foreach($recs as $i=>$rc): ?>
-                  <span class="rec-pill"><?= htmlspecialchars($rc['gname']) ?> • <?= (int)$rc['count'] ?> วิชา</span>
+                  <span class="rec-pill"><?php echo htmlspecialchars($rc['gname'], ENT_QUOTES, 'UTF-8'); ?> • <?php echo (int)$rc['count']; ?> วิชา</span>
                 <?php endforeach; ?>
-                <button class="rec-btn" onclick="openRecModal('<?= $rid ?>')"><i class="fas fa-eye"></i> ดู</button>
+                <button class="rec-btn" onclick="openDetailFromId('<?php echo $rid; ?>')"><i class="fas fa-eye"></i> ดู</button>
               </div>
             <?php else: ?>
               <span class="badge">— ไม่มีข้อมูลแนะนำ —</span>
             <?php endif; ?>
           </td>
         </tr>
-
-        <!-- Modal per student -->
-        <div id="modal-<?= $rid ?>" class="modal" aria-hidden="true">
-          <div class="modal-card">
-            <div class="modal-header">
-              <strong>คำแนะนำสำหรับ: <?= htmlspecialchars($r['student_id'].' - '.$r['full_name']) ?></strong>
-              <button class="close" onclick="closeRecModal('<?= $rid ?>')">ปิด</button>
-            </div>
-            <div class="modal-body">
-              <?php if ($recs): foreach($recs as $blk): ?>
-                <h4 style="margin:8px 0 6px;color:#9ee7f7"><?= htmlspecialchars($blk['gname']) ?> <small style="color:#9CA3AF">• <?= (int)$blk['count'] ?> วิชา</small></h4>
-                <?php if ($blk['courses']): foreach($blk['courses'] as $c): ?>
-                  <div class="course-item">
-                    <div><strong><?= htmlspecialchars($c['course_code'].' - '.$c['course_name']) ?></strong></div>
-                    <small>
-                      หลักสูตร: <?= htmlspecialchars($c['cur_name'] ?? '—') ?> /
-                      ปีหลักสูตร: <?= htmlspecialchars($c['cur_year'] ?? '—') ?>
-                    </small>
-                  </div>
-                <?php endforeach; else: ?>
-                  <div class="course-item"><small>— ไม่พบวิชาในกลุ่มนี้ —</small></div>
-                <?php endif; ?>
-              <?php endforeach; else: ?>
-                <div class="course-item"><small>— ไม่มีคำแนะนำ —</small></div>
-              <?php endif; ?>
-            </div>
-          </div>
-        </div>
         <?php endforeach; else: ?>
-        <tr><td colspan="8" style="color:var(--muted);text-align:center">ไม่พบข้อมูล</td></tr>
+        <tr><td colspan="9" style="color:var(--muted);text-align:center">ไม่พบข้อมูล</td></tr>
         <?php endif; ?>
       </tbody>
     </table>
@@ -389,10 +498,13 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
 
   <?php if ($total_pages > 1): ?>
   <div class="pagination">
-    <?php $qs=$_GET; unset($qs['page']);
-    for($i=1;$i<=$total_pages;$i++):
-      $link='?'.http_build_query($qs+['page'=>$i]); ?>
-      <a class="page-link <?= $i===$page?'active':'' ?>" href="<?= $link ?>"><?= $i ?></a>
+    <?php
+      $qs=$_GET; unset($qs['page']);
+      for($i=1;$i<=$total_pages;$i++):
+        $link='?'.http_build_query($qs+['page'=>$i]);
+        $isActive = ($i===$page) ? 'active' : '';
+    ?>
+      <a class="page-link <?php echo $isActive; ?>" href="<?php echo htmlspecialchars($link, ENT_QUOTES, 'UTF-8'); ?>"><?php echo $i; ?></a>
     <?php endfor; ?>
   </div>
   <?php endif; ?>
@@ -400,15 +512,105 @@ th{position:sticky;top:0;background:var(--p1);text-align:left;color:#E5E7EB}
 
 <a href="admin_dashboard.php" class="home-btn"><i class="fas fa-home"></i> หน้าหลัก</a>
 
+<!-- Shared detail modal -->
+<div id="detail-modal" class="modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <strong id="detail-title">รายละเอียด</strong>
+      <button class="close" onclick="closeDetail()">ปิด</button>
+    </div>
+    <div class="modal-body" id="detail-body">
+      กำลังโหลด...
+    </div>
+  </div>
+</div>
+
 <script>
-function openRecModal(id){
-  const m = document.getElementById('modal-'+id);
-  if (m){ m.style.display='flex'; document.body.style.overflow='hidden'; }
+document.addEventListener('click', async (e) => {
+  const a = e.target.closest('.student-link');
+  if (!a) return;
+  e.preventDefault();
+  const sid = a.getAttribute('data-sid');
+  openDetail();
+  await loadDetail(sid);
+});
+
+async function openDetailFromId(sid){
+  openDetail();
+  await loadDetail(sid);
 }
-function closeRecModal(id){
-  const m = document.getElementById('modal-'+id);
-  if (m){ m.style.display='none'; document.body.style.overflow='auto'; }
+
+async function loadDetail(sid){
+  try{
+    const res = await fetch(`?ajax=quiz_detail&sid=${encodeURIComponent(sid)}`, {cache:'no-store'});
+    const js  = await res.json();
+    if(!js.ok) throw new Error(js.error || 'โหลดข้อมูลล้มเหลว');
+
+    const mTitle = document.getElementById('detail-title');
+    const mBody  = document.getElementById('detail-body');
+
+    const astMap = {
+      'active':'กำลังศึกษา',
+      'graduated':'สำเร็จการศึกษา',
+      'leave':'ลาพัก',
+      'suspended':'พักการเรียน'
+    };
+
+    mTitle.textContent = `ผลแบบทดสอบ: ${js.student.student_id} — ${js.student.full_name}`;
+
+    let html = `
+      <div style="margin-bottom:10px;color:#9CA3AF">
+        กลุ่ม: ${js.student.group_name ? js.student.group_name : '—'}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px">
+        <div class="badge">สถานะ: ${astMap[js.stats.academic_status] || 'กำลังศึกษา'}</div>
+        <div class="badge">ทำแบบทดสอบ (ครั้ง): ${js.stats.quiz_attempts}</div>
+        <div class="badge">แนะนำสำเร็จ: ${js.stats.recommended_count}</div>
+        <div class="badge">สิทธิ์เพิ่ม(แอดมิน): ${js.stats.admin_override_attempts}</div>
+      </div>
+    `;
+
+    if (Array.isArray(js.recs) && js.recs.length){
+      js.recs.forEach(block => {
+        html += `
+          <h4 style="margin:8px 0 6px;color:#9ee7f7">${block.gname} <small style="color:#9CA3AF">• ${block.count} วิชา</small></h4>
+        `;
+        if (Array.isArray(block.courses) && block.courses.length){
+          block.courses.forEach(c => {
+            html += `
+              <div class="course-item">
+                <div><strong>${(c.course_code||'')} - ${(c.course_name||'')}</strong></div>
+                <small>หลักสูตร: ${(c.cur_name||'—')} / ปีหลักสูตร: ${(c.cur_year||'—')}</small>
+              </div>
+            `;
+          });
+        }else{
+          html += `<div class="course-item"><small>— ไม่พบวิชาในกลุ่มนี้ —</small></div>`;
+        }
+      });
+    }else{
+      html += `<div class="course-item"><small>— ไม่มีคำแนะนำ —</small></div>`;
+    }
+
+    mBody.innerHTML = html;
+
+  }catch(err){
+    document.getElementById('detail-body').innerHTML =
+      `<div class="course-item"><small style="color:#fca5a5">เกิดข้อผิดพลาด: ${err.message}</small></div>`;
+  }
 }
+
+function openDetail(){
+  const m = document.getElementById('detail-modal');
+  m.style.display='flex'; document.body.style.overflow='hidden';
+  document.getElementById('detail-title').textContent = 'รายละเอียด';
+  document.getElementById('detail-body').textContent = 'กำลังโหลด...';
+}
+function closeDetail(){
+  const m = document.getElementById('detail-modal');
+  m.style.display='none'; document.body.style.overflow='auto';
+}
+
 document.addEventListener('keydown', e=>{
   if (e.key==='Escape'){
     document.querySelectorAll('.modal').forEach(m=>m.style.display='none');

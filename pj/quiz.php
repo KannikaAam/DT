@@ -4,9 +4,8 @@
    ใช้ตาราง: groups, subjects, questions, quiz_results, quiz_answers (ฐาน projact2)
    ========================================================= */
 session_start();
-require __DIR__ . '/db_connect.php'; // <-- ปรับชื่อให้ตรงไฟล์เชื่อม DB ของคุณ
+require __DIR__ . '/db_connect.php'; // ใช้ $pdo (PDO)
 
-// ===== ตรวจล็อกอินนักศึกษา =====
 if (!isset($_SESSION['student_id'])) {
     header('Location: login.php');
     exit;
@@ -19,13 +18,14 @@ $SHOW_QUIZ    = false;
 $SHOW_RESULT  = false;
 $RESULT_GROUP = null;
 $RESULT_GROUP_NAME = null;
+$RESULT_SUBJECTS = [];
 
 // ===== Helper =====
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function goto_q($qid){ header('Location: quiz.php?qid='.(int)$qid); exit; }
-function ans($qid, $bag){ return isset($bag[$qid]) ? (int)$bag[$qid] : -1; } // -1 ยังไม่ตอบ
+function ans($qid, $bag){ return isset($bag[$qid]) ? (int)$bag[$qid] : -1; } // -1 = ยังไม่ตอบ
 
-// ===== Auto-migrate กันพัง (สร้างตารางผลลัพธ์/คำตอบถ้ายังไม่มี) =====
+// ===== Auto-migrate: สร้างตาราง/คอลัมน์ที่ต้องใช้ =====
 $pdo->exec("
 CREATE TABLE IF NOT EXISTS quiz_results (
   result_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS quiz_results (
   recommend_group_id INT DEFAULT NULL,
   completed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+");
+
+$pdo->exec("
 CREATE TABLE IF NOT EXISTS quiz_answers (
   answer_id INT AUTO_INCREMENT PRIMARY KEY,
   result_id INT NOT NULL,
@@ -43,9 +46,48 @@ CREATE TABLE IF NOT EXISTS quiz_answers (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ");
 
-// ===== ฟังก์ชันบันทึกผล แล้ว “เตรียม” ให้โชว์ผลในหน้านี้เลย =====
+// ensure: result_id column exists
+$col = $pdo->query("SHOW COLUMNS FROM quiz_answers LIKE 'result_id'")->fetch(PDO::FETCH_ASSOC);
+if (!$col) {
+    $pdo->exec("ALTER TABLE quiz_answers ADD COLUMN result_id INT NOT NULL AFTER answer_id");
+}
+
+// ensure: index on result_id
+$idx = $pdo->query("SHOW INDEX FROM quiz_answers WHERE Key_name = 'idx_result'")->fetch(PDO::FETCH_ASSOC);
+if (!$idx) {
+    $pdo->exec("ALTER TABLE quiz_answers ADD KEY idx_result (result_id)");
+}
+
+// ensure: foreign key exists
+$fkStmt = $pdo->prepare("
+SELECT CONSTRAINT_NAME
+FROM information_schema.KEY_COLUMN_USAGE
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'quiz_answers'
+  AND COLUMN_NAME = 'result_id'
+  AND REFERENCED_TABLE_NAME = 'quiz_results'
+");
+$fkStmt->execute();
+if (!$fkStmt->fetch(PDO::FETCH_ASSOC)) {
+    try {
+        $pdo->exec("ALTER TABLE quiz_answers ADD CONSTRAINT qa_fk_result FOREIGN KEY (result_id) REFERENCES quiz_results(result_id) ON DELETE CASCADE");
+    } catch (PDOException $e) {
+        // ถ้ามี FK อยู่แล้ว หรือ engine ไม่รองรับ ก็ข้ามได้
+    }
+}
+
+// ===== บันทึกผล + เก็บ answers =====
 function save_and_prepare_result(PDO $pdo, int $student_id, int $group_id): int {
-    $_SESSION['final_result'] = ['recommend_group_id' => $group_id];
+    // นับจำนวน "ไม่ใช่"
+    $no_count = 0;
+    if (!empty($_SESSION['answers']) && is_array($_SESSION['answers'])) {
+        foreach ($_SESSION['answers'] as $v) { if ((int)$v === 0) $no_count++; }
+    }
+
+    $_SESSION['final_result'] = [
+        'recommend_group_id' => $group_id,
+        'no_count' => $no_count,
+    ];
 
     try {
         $pdo->beginTransaction();
@@ -70,6 +112,30 @@ function save_and_prepare_result(PDO $pdo, int $student_id, int $group_id): int 
     return $group_id;
 }
 
+// ===== บันทึกลง test_history (ให้ history.php อ่านได้) =====
+function saveTestHistoryPDO(PDO $pdo, string $student_id, ?string $group, ?string $subjects, int $no_count): bool {
+    try {
+        // สร้างตารางถ้ายังไม่มี
+        $pdo->exec("CREATE TABLE IF NOT EXISTS test_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(255) NOT NULL,
+            recommended_group VARCHAR(255),
+            recommended_subjects TEXT,
+            no_count INT DEFAULT 0,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+        $sid = $_SESSION['student_id']; // ต้องเป็นรหัสนักศึกษา
+        $stmt = $conn->prepare("
+            INSERT INTO test_history (username, recommended_group, recommended_subjects, timestamp)VALUES (?, ?, ?, NOW())");
+        $stmt->bind_param("sss", $sid, $group, $subjects_json);
+        return $st->execute([$student_id, $group, $subjects, $no_count]);
+    } catch (PDOException $e) {
+        error_log("saveTestHistoryPDO: ".$e->getMessage());
+        return false;
+    }
+}
+
 /* =========================================================
    PART 1: PROCESSING (รับคำตอบ/ตัดสินใจทางเดิน)
    ========================================================= */
@@ -80,8 +146,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!isset($_SESSION['answers'])) $_SESSION['answers'] = [];
     if ($qid > 0 && ($val === 0 || $val === 1)) $_SESSION['answers'][$qid] = $val;
     $a = $_SESSION['answers'];
-
-    // ===== ตรรกะ decision tree (เหมือนของคุณ) =====
 
     // ทางแยกหลัก
     if ($qid == 1) { if (ans(1,$a)==1) goto_q(2); else goto_q(24); }
@@ -104,59 +168,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // ข้อ 12
     if ($qid == 12) {
-        $E = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
-        $P = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
-
-        if (($E || $P) && ans(12,$a)==1) {
-            goto_q(14);
-        } else {
-            $A = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
-            $B = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
-            $C = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==1);
-            $D = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==1);
-
-            if (($A||$B||$C||$D||$E) && ans(12,$a)==0) {
-                goto_q(14);
-            } else {
-                $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1);
-                $SHOW_RESULT = true;
-            }
-        }
+        if (ans(12,$a) == 1) { goto_q(14); }
+        else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1); $SHOW_RESULT = true; }
     }
 
     // ข้อ 13
     if (!$SHOW_RESULT && $qid == 13) {
-        $Always1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
-        $Always2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
-        $Always3 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
-        $Always4 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
-
-        if ($Always1 || $Always2 || $Always3 || $Always4) {
-            goto_q(14);
-        } else {
-            $OnNo1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
-            $OnNo2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
-            $OnNo3 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
-            $OnNo4 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
-            $OnNo5 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
-            $OnNo6 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==1 && ans(10,$a)==0);
-            $OnNo7 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
-
-            if (($OnNo1||$OnNo2||$OnNo3||$OnNo4||$OnNo5||$OnNo6||$OnNo7) && ans(13,$a)==0) {
-                goto_q(14);
-            } else {
-                $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1);
-                $SHOW_RESULT = true;
-            }
-        }
+        if (ans(13,$a) == 0) { goto_q(14); }
+        else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1); $SHOW_RESULT = true; }
     }
 
     // กลุ่ม 2: 14–23
     if (!$SHOW_RESULT && $qid == 14) {
-        $R1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0 && ans(13,$a)==0);
-        $R2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0 && ans(13,$a)==0);
-        if ($R1 || $R2) { (ans(14,$a)==0) ? goto_q(10) : goto_q(15); }
-        else { (ans(14,$a)==1) ? goto_q(15) : goto_q(24); }
+        if (ans(14,$a) == 1) { goto_q(15); }
+        else { goto_q(10); } // ย้อนกลับไปสรุปกลุ่ม 1 ตามเส้นทาง 10/12/13
     }
 
     if (!$SHOW_RESULT && $qid >= 15 && $qid <= 21) {
@@ -173,19 +198,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$SHOW_RESULT && $qid == 22) {
         $L = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==0 && ans(21,$a)==1);
-        if ($L && ans(22,$a)==1) {
-            goto_q(24);
-        } else {
+        if ($L && ans(22,$a)==1) { goto_q(24); }
+        else {
             $A = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==1 && ans(16,$a)==0 && ans(19,$a)==0 && ans(21,$a)==1);
             $B = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==1 && ans(18,$a)==0 && ans(21,$a)==1);
             $C = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==1 && ans(20,$a)==1);
             $D = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==0 && ans(21,$a)==1);
-            if (($A||$B||$C||$D) && ans(22,$a)==0) {
-                goto_q(24);
-            } else {
-                $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2);
-                $SHOW_RESULT = true;
-            }
+            if (($A||$B||$C||$D) && ans(22,$a)==0) { goto_q(24); }
+            else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2); $SHOW_RESULT = true; }
         }
     }
 
@@ -195,12 +215,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $Y3 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==1 && ans(20,$a)==0);
         $Y4 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==0 && ans(21,$a)==0);
 
-        if (($Y1||$Y2||$Y3||$Y4) && ans(23,$a)==1) {
-            goto_q(24);
-        } else {
-            if (ans(23,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2); $SHOW_RESULT = true; }
-            else { goto_q(24); }
-        }
+        if (($Y1||$Y2||$Y3||$Y4) && ans(23,$a)==1) { goto_q(24); }
+        else { if (ans(23,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2); $SHOW_RESULT = true; } else { goto_q(24); } }
     }
 
     // กลุ่ม 3: 24–33
@@ -251,15 +267,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         else { if (ans(33,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; } else { goto_q(14); } }
     }
 
-    // Fallback
-    if (!$SHOW_RESULT) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; }
+    // Fallback: ปลอดภัยกว่า → กลับไป 14
+    if (!$SHOW_RESULT) { goto_q(14); }
 }
 
 /* =========================================================
    PART 2: DISPLAY (กำหนดโหมด)
    ========================================================= */
 if ($SHOW_RESULT) {
-    // ดึงชื่อกลุ่มจากตาราง groups (ไม่ใช่ subject_groups)
     try {
         $stmt = $pdo->prepare("SELECT group_name FROM `groups` WHERE group_id = ?");
         $stmt->execute([$RESULT_GROUP]);
@@ -271,6 +286,19 @@ if ($SHOW_RESULT) {
     } catch (PDOException $e) {
         $RESULT_GROUP_NAME = null;
         $RESULT_SUBJECTS = [];
+    }
+
+    if (empty($_SESSION['final_result_saved']) && !empty($_SESSION['final_result'])) {
+        $no_count = (int)($_SESSION['final_result']['no_count'] ?? 0);
+        $subjects_text = '';
+        if (!empty($RESULT_SUBJECTS)) {
+            $names = array_map(fn($r)=>$r['subject_name'] ?? '', $RESULT_SUBJECTS);
+            $subjects_text = implode("\n", array_filter($names));
+        }
+        $group_text = $RESULT_GROUP_NAME ?: ('กลุ่มที่ '.(int)$RESULT_GROUP);
+        if (saveTestHistoryPDO($pdo, (string)$STUDENT_ID, $group_text, $subjects_text, $no_count)) {
+            $_SESSION['final_result_saved'] = true;
+        }
     }
 }
 elseif (isset($_GET['qid'])) {
@@ -285,7 +313,7 @@ elseif (isset($_GET['qid'])) {
         die("เกิดข้อผิดพลาดในการดึงคำถาม: ".$e->getMessage());
     }
 } else {
-    unset($_SESSION['answers'], $_SESSION['final_result']);
+    unset($_SESSION['answers'], $_SESSION['final_result'], $_SESSION['final_result_saved']);
     $SHOW_START = true;
 }
 ?>
@@ -293,169 +321,766 @@ elseif (isset($_GET['qid'])) {
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>แบบทดสอบแนะนำรายวิชา</title>
-<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>แบบทดสอบแนะนำรายวิชาชีพเลือก</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 <style>
-/* ===== Theme (ตามพาเลต) ===== */
-:root{
-  --blue-700:#3674B5;
-  --blue-500:#578FCA;
-  --cream:#F5F0CD;
-  --yellow:#FADA7A;
-  --ink:#1f2d3d;
-  --muted:#6b7a90;
-  --card:#ffffff;
-  --ring: rgba(54,116,181,.35);
+/* ===== Modern Color Palette ===== */
+:root {
+  --primary-600: #2563eb;
+  --primary-500: #3b82f6;
+  --primary-400: #60a5fa;
+  --primary-100: #dbeafe;
+  --primary-50: #eff6ff;
+  
+  --secondary-600: #dc2626;
+  --secondary-500: #ef4444;
+  --secondary-100: #fee2e2;
+  
+  --accent-600: #d97706;
+  --accent-500: #f59e0b;
+  --accent-100: #fef3c7;
+  
+  --success-600: #059669;
+  --success-500: #10b981;
+  --success-100: #d1fae5;
+  
+  --gray-900: #111827;
+  --gray-800: #1f2937;
+  --gray-700: #374151;
+  --gray-600: #4b5563;
+  --gray-500: #6b7280;
+  --gray-400: #9ca3af;
+  --gray-300: #d1d5db;
+  --gray-200: #e5e7eb;
+  --gray-100: #f3f4f6;
+  --gray-50: #f9fafb;
+  
+  --white: #ffffff;
+  --shadow: rgba(0, 0, 0, 0.1);
+  --shadow-lg: rgba(0, 0, 0, 0.15);
+  --shadow-xl: rgba(0, 0, 0, 0.25);
 }
 
-/* พื้นหลังเป็นแถบสีตามรูป */
-*{box-sizing:border-box}
-body{
-  font-family:'Sarabun',sans-serif;
-  color:var(--ink);
-  margin:0; min-height:100vh;
-  display:flex; align-items:center; justify-content:center;
-  background:
-    linear-gradient(180deg,
-      var(--blue-700) 0 34%,
-      var(--blue-500) 34% 58%,
-      var(--cream)    58% 79%,
-      var(--yellow)   79% 100%);
+/* ===== Reset & Base ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
-/* กล่องการ์ด */
-.card{
-  position:relative;
-  background:var(--card);
-  border-radius:16px;
-  box-shadow:0 14px 40px rgba(0,0,0,.12), 0 2px 8px rgba(0,0,0,.06);
-  padding:28px;
-  max-width:920px; width:92%;
-  border:1px solid rgba(87,143,202,.15);
-}
-.card::before{
-  content:"";
-  position:absolute; inset:0 0 auto 0; height:8px;
-  border-radius:16px 16px 0 0;
-  background:linear-gradient(90deg,var(--blue-700),var(--blue-500));
+body {
+  font-family: 'Sarabun', sans-serif;
+  background: linear-gradient(135deg, var(--primary-50) 0%, var(--primary-100) 100%);
+  color: var(--gray-800);
+  min-height: 100vh;
+  padding: 1rem;
+  overflow-x: hidden;
 }
 
-/* หัวเรื่อง/คำโปรย */
-h1{margin:6px 0 12px; color:var(--blue-700); letter-spacing:.2px}
-.lead{color:var(--muted); margin:0 0 22px}
-
-/* meta/badges */
-.meta{
-  margin:6px 0 18px; color:var(--muted);
-  display:inline-flex; gap:10px; flex-wrap:wrap;
-}
-.meta strong{
-  color:var(--blue-700);
-  background:linear-gradient(0deg, rgba(250,218,122,.26), rgba(245,240,205,.26));
-  border:1px solid rgba(250,218,122,.5);
-  padding:4px 10px; border-radius:999px; font-weight:700;
-}
-
-/* ปุ่ม */
-.btn{
-  appearance:none; border:0; cursor:pointer;
-  display:inline-flex; align-items:center; justify-content:center;
-  gap:8px; text-decoration:none; font-weight:700;
-  padding:14px 22px; border-radius:12px; min-width:160px;
-  background:linear-gradient(135deg,var(--blue-700),var(--blue-500));
-  color:#fff; box-shadow:0 6px 16px rgba(54,116,181,.35);
-  transition:transform .15s ease, box-shadow .15s ease, filter .15s ease;
-}
-.btn:hover{ transform:translateY(-2px); box-shadow:0 10px 22px rgba(54,116,181,.38) }
-.btn:active{ transform:translateY(0); filter:saturate(.95) }
-.btn:focus-visible{ outline:none; box-shadow:0 0 0 4px var(--ring) }
-
-.btn--alt{
-  background:linear-gradient(135deg,var(--yellow), #FFE59A);
-  color:#7a5b00;
-  box-shadow:0 6px 16px rgba(250,218,122,.35);
-}
-.btn--ghost{
-  background:transparent; color:var(--blue-700);
-  border:2px solid var(--blue-500);
+/* ===== Animated Background ===== */
+body::before {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: 
+    radial-gradient(circle at 20% 80%, rgba(59, 130, 246, 0.15) 0%, transparent 50%),
+    radial-gradient(circle at 80% 20%, rgba(239, 68, 68, 0.1) 0%, transparent 50%),
+    radial-gradient(circle at 40% 40%, rgba(16, 185, 129, 0.1) 0%, transparent 50%);
+  animation: float 20s ease-in-out infinite;
+  z-index: -1;
 }
 
-/* กล่องคำถาม */
-.qbox{
-  border:1px solid rgba(87,143,202,.25);
-  background:linear-gradient(0deg, rgba(245,240,205,.45), rgba(245,240,205,.15));
-  border-radius:12px; padding:18px; margin:16px 0 22px;
-}
-.qtext{font-weight:700; font-size:1.15rem; margin:0 0 12px; color:#24466a}
-
-/* ตัวเลือก “ใช่/ไม่ใช่” */
-.answers{display:flex; gap:18px; flex-wrap:wrap}
-.answers label{display:flex; align-items:center; gap:10px; cursor:pointer; font-size:1.08rem}
-.answers input[type="radio"]{
-  width:20px; height:20px; accent-color:var(--blue-700);
-  border-radius:50%;
-  box-shadow:0 0 0 2px rgba(87,143,202,.25);
-}
-.answers input[type="radio"]:focus-visible{
-  outline:none; box-shadow:0 0 0 4px var(--ring);
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg); }
+  50% { transform: translateY(-20px) rotate(5deg); }
 }
 
-/* รายการวิชา */
-.list{margin-top:10px; padding-left:18px}
-.list li{margin:.3rem 0}
+/* ===== Container ===== */
+.container {
+  max-width: 900px;
+  margin: 2rem auto;
+  position: relative;
+}
 
-/* ส่วนลิงก์/ปุ่มท้ายผลลัพธ์ */
-.actions{display:flex; gap:12px; flex-wrap:wrap; margin-top:16px}
+/* ===== Card Design ===== */
+.card {
+  background: var(--white);
+  border-radius: 24px;
+  box-shadow: 
+    0 20px 25px -5px var(--shadow),
+    0 10px 10px -5px var(--shadow-lg);
+  padding: 3rem;
+  position: relative;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
 
-/* ปรับภาพรวมให้โปร่ง นุ่มนวล */
-::selection{background:rgba(87,143,202,.35)}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: linear-gradient(90deg, var(--primary-500), var(--accent-500), var(--success-500));
+  border-radius: 24px 24px 0 0;
+}
+
+/* ===== Typography ===== */
+h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--gray-900);
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, var(--primary-600), var(--primary-500));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.lead {
+  font-size: 1.25rem;
+  color: var(--gray-600);
+  margin-bottom: 2rem;
+  line-height: 1.6;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: linear-gradient(135deg, var(--primary-100), var(--primary-50));
+  color: var(--primary-600);
+  padding: 0.5rem 1rem;
+  border-radius: 50px;
+  border: 1px solid var(--primary-200);
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.badge i {
+  font-size: 1rem;
+}
+
+/* ===== Buttons ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.875rem 2rem;
+  border-radius: 16px;
+  font-weight: 600;
+  font-size: 1rem;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  min-width: 140px;
+}
+
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.6s;
+}
+
+.btn:hover::before {
+  left: 100%;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary-600), var(--primary-500));
+  color: var(--white);
+  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.3);
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 35px rgba(37, 99, 235, 0.4);
+}
+
+.btn-secondary {
+  background: linear-gradient(135deg, var(--gray-600), var(--gray-500));
+  color: var(--white);
+  box-shadow: 0 8px 25px rgba(75, 85, 99, 0.3);
+}
+
+.btn-secondary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 35px rgba(75, 85, 99, 0.4);
+}
+
+.btn-success {
+  background: linear-gradient(135deg, var(--success-600), var(--success-500));
+  color: var(--white);
+  box-shadow: 0 8px 25px rgba(5, 150, 105, 0.3);
+}
+
+.btn-success:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 35px rgba(5, 150, 105, 0.4);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--primary-600);
+  border: 2px solid var(--primary-200);
+  box-shadow: none;
+}
+
+.btn-outline:hover {
+  background: var(--primary-50);
+  border-color: var(--primary-300);
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, var(--secondary-600), var(--secondary-500));
+  color: var(--white);
+  box-shadow: 0 8px 25px rgba(220, 38, 38, 0.3);
+}
+
+.btn-danger:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 35px rgba(220, 38, 38, 0.4);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+}
+
+/* ===== Question Box ===== */
+.question-container {
+  background: linear-gradient(135deg, var(--primary-50), var(--white));
+  border-radius: 20px;
+  padding: 2rem;
+  margin: 2rem 0;
+  border: 1px solid var(--primary-100);
+  position: relative;
+  overflow: hidden;
+}
+
+.question-container::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+  animation: pulse 4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.1); }
+}
+
+.question-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.question-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary-500), var(--primary-400));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--white);
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.question-text {
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--gray-800);
+  line-height: 1.5;
+  position: relative;
+  z-index: 1;
+}
+
+/* ===== Answer Options ===== */
+.answers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.answer-option {
+  position: relative;
+}
+
+.answer-option input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.answer-label {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 16px;
+  border: 2px solid var(--gray-200);
+  background: var(--white);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  font-size: 1.1rem;
+  font-weight: 500;
+  position: relative;
+  overflow: hidden;
+}
+
+.answer-label::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.1), transparent);
+  transition: left 0.5s;
+}
+
+.answer-label:hover::before {
+  left: 100%;
+}
+
+.answer-option input[type="radio"]:checked + .answer-label {
+  border-color: var(--primary-400);
+  background: linear-gradient(135deg, var(--primary-50), var(--white));
+  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.15);
+  transform: translateY(-2px);
+}
+
+.radio-custom {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--gray-300);
+  border-radius: 50%;
+  position: relative;
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+
+.answer-option input[type="radio"]:checked + .answer-label .radio-custom {
+  border-color: var(--primary-500);
+  background: var(--primary-500);
+}
+
+.radio-custom::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--white);
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 0.3s ease;
+}
+
+.answer-option input[type="radio"]:checked + .answer-label .radio-custom::after {
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.answer-text {
+  color: var(--gray-700);
+  font-weight: 500;
+}
+
+.answer-option input[type="radio"]:checked + .answer-label .answer-text {
+  color: var(--primary-600);
+  font-weight: 600;
+}
+
+/* ===== Result Section ===== */
+.result-container {
+  text-align: center;
+  padding: 2rem 0;
+}
+
+.result-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--success-500), var(--success-400));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--white);
+  font-size: 2rem;
+  margin: 0 auto 2rem;
+  animation: celebration 0.6s ease-out;
+}
+
+@keyframes celebration {
+  0% { transform: scale(0) rotate(0deg); }
+  50% { transform: scale(1.2) rotate(180deg); }
+  100% { transform: scale(1) rotate(360deg); }
+}
+
+.result-title {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--gray-900);
+  margin-bottom: 1rem;
+}
+
+.result-group {
+  display: inline-block;
+  background: linear-gradient(135deg, var(--success-100), var(--success-50));
+  color: var(--success-600);
+  padding: 0.75rem 2rem;
+  border-radius: 50px;
+  border: 2px solid var(--success-200);
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 1rem 0 2rem;
+}
+
+.subjects-container {
+  background: var(--gray-50);
+  border-radius: 16px;
+  padding: 2rem;
+  margin: 2rem 0;
+  border: 1px solid var(--gray-200);
+}
+
+.subjects-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--gray-800);
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.subjects-list {
+  list-style: none;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.subjects-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--white);
+  border-radius: 12px;
+  border: 1px solid var(--gray-200);
+  color: var(--gray-700);
+  transition: all 0.3s ease;
+}
+
+.subjects-list li:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateX(4px);
+}
+
+.subjects-list li::before {
+  content: '📚';
+  font-size: 1.25rem;
+}
+
+/* ===== Actions (Button Groups) ===== */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: center;
+  margin-top: 3rem;
+}
+
+/* ===== Progress Indicator ===== */
+.progress-container {
+  margin-bottom: 2rem;
+}
+
+.progress-text {
+  font-size: 0.9rem;
+  color: var(--gray-600);
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: var(--gray-200);
+  border-radius: 50px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary-500), var(--primary-400));
+  border-radius: 50px;
+  transition: width 0.5s ease;
+}
+
+/* ===== Responsive Design ===== */
+@media (max-width: 768px) {
+  body { padding: 0.5rem; }
+  .container { margin: 1rem auto; }
+  .card { padding: 2rem 1.5rem; border-radius: 16px; }
+  h1 { font-size: 2rem; }
+  .lead { font-size: 1.1rem; }
+  .question-text { font-size: 1.2rem; }
+  .answers { grid-template-columns: 1fr; gap: 1rem; }
+  .answer-label { padding: 1rem 1.25rem; }
+  .actions { flex-direction: column; align-items: center; }
+  .btn { width: 100%; max-width: 300px; }
+  .meta { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+}
+
+@media (max-width: 480px) {
+  .card { padding: 1.5rem 1rem; }
+  h1 { font-size: 1.75rem; }
+  .question-container { padding: 1.5rem; }
+  .question-header { flex-direction: column; text-align: center; gap: 1rem; }
+  .question-icon { width: 60px; height: 60px; font-size: 1.5rem; }
+}
+
+/* ===== Loading Animation ===== */
+.loading {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--white);
+  border-radius: 50%;
+  border-top-color: transparent;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== Fade In Animation ===== */
+.fade-in { animation: fadeIn 0.6s ease-out; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 </style>
-
 </head>
 <body>
-<div class="card">
-<?php if ($SHOW_START): ?>
-    <h1>แบบทดสอบแนะนำรายวิชา</h1>
-    <p class="lead">ระบบจะถามคำถามแบบ “ใช่ / ไม่ใช่” แล้วสรุปกลุ่มวิชาที่เหมาะกับคุณ</p>
-    <div class="meta">รหัสนักศึกษา: <strong><?= h($STUDENT_ID) ?></strong></div>
-    <a class="btn" href="quiz.php?qid=1">เริ่มทำแบบทดสอบ</a>
 
-<?php elseif ($SHOW_QUIZ): ?>
-    <h1>แบบทดสอบ</h1>
-    <div class="meta">รหัสนักศึกษา: <strong><?= h($STUDENT_ID) ?></strong> | ข้อที่: <strong><?= (int)$question['question_id'] ?></strong></div>
-    <form method="POST" action="quiz.php">
-        <input type="hidden" name="qid" value="<?= (int)$question['question_id'] ?>">
-        <div class="qbox">
-            <p class="qtext"><?= h($question['question_text']) ?></p>
-            <div class="answers">
-                <label><input type="radio" name="answer" value="1" required> ใช่</label>
-                <label><input type="radio" name="answer" value="0"> ไม่ใช่</label>
-            </div>
+<div class="container">
+  <div class="card fade-in">
+
+    <?php if ($SHOW_START): ?>
+      <div class="result-container">
+        <div class="result-icon">
+          <i class="fas fa-graduation-cap"></i>
         </div>
-        <button type="submit" class="btn">ข้อต่อไป</button>
-    </form>
+        <h1>แบบทดสอบแนะนำรายวิชาชีพเลือก</h1>
+        <p class="lead">ระบบจะถามคำถามแบบ "ใช่ / ไม่ใช่" เพื่อวิเคราะห์และแนะนำกลุ่มวิชาที่เหมาะสมกับคุณมากที่สุด</p>
+        
+        <div class="meta">
+          <div class="badge">
+            <i class="fas fa-user"></i>
+            รหัสนักศึกษา: <?= h($STUDENT_ID) ?>
+          </div>
+          <div class="badge">
+            <i class="fas fa-clock"></i>
+            ประมาณ 5-10 นาที
+          </div>
+        </div>
 
-<?php elseif ($SHOW_RESULT): ?>
-    <h1>ผลลัพธ์ของคุณ</h1>
-    <p class="lead">ระบบแนะนำกลุ่มวิชา:
-        <strong><?= $RESULT_GROUP_NAME ? h($RESULT_GROUP_NAME) : ('Group #'.(int)$RESULT_GROUP) ?></strong>
-    </p>
-    <?php if (!empty($RESULT_SUBJECTS)): ?>
-      <div>
-        <div class="meta">รายวิชาแนะนำในกลุ่มนี้:</div>
-        <ul class="list">
-          <?php foreach ($RESULT_SUBJECTS as $row): ?>
-            <li><?= h($row['subject_name']) ?></li>
-          <?php endforeach; ?>
-        </ul>
+        <div class="actions">
+          <a href="quiz.php?qid=1" class="btn btn-primary">
+            <i class="fas fa-play"></i>
+            เริ่มทำแบบทดสอบ
+          </a>
+          <a href="student_dashboard.php" class="btn btn-outline">
+            <i class="fas fa-home"></i>
+            กลับหน้าหลัก
+          </a>
+        </div>
       </div>
-    <?php endif; ?>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
-        <a class="btn" href="quiz.php">เริ่มใหม่</a>
-        <a class="btn btn--alt" href="student_dashboard.php">กลับหน้าแดชบอร์ด</a>
+
+    <?php elseif ($SHOW_QUIZ): ?>
+      <h1>แบบทดสอบแนะนำรายวิชาชีพเลือก</h1>
+      
+      <div class="meta">
+        <div class="badge">
+          <i class="fas fa-user"></i>
+          <?= h($STUDENT_ID) ?>
+        </div>
+        <div class="badge">
+          <i class="fas fa-question-circle"></i>
+          ข้อที่ <?= (int)$question['question_id'] ?>
+        </div>
+      </div>
+
+      <form method="POST" action="quiz.php">
+        <input type="hidden" name="qid" value="<?= (int)$question['question_id'] ?>">
+        
+        <div class="question-container">
+          <div class="question-header">
+            <div class="question-icon">
+              <i class="fas fa-lightbulb"></i>
+            </div>
+            <div class="question-text"><?= h($question['question_text']) ?></div>
+          </div>
+
+          <div class="answers">
+            <div class="answer-option">
+              <input type="radio" name="answer" value="1" id="answer_yes" required>
+              <label for="answer_yes" class="answer-label">
+                <div class="radio-custom"></div>
+                <div class="answer-text">
+                  <i class="fas fa-check text-success"></i> ใช่
+                </div>
+              </label>
+            </div>
             
-    </div>
-<?php endif; ?>
+            <div class="answer-option">
+              <input type="radio" name="answer" value="0" id="answer_no">
+              <label for="answer_no" class="answer-label">
+                <div class="radio-custom"></div>
+                <div class="answer-text">
+                  <i class="fas fa-times text-danger"></i> ไม่ใช่
+                </div>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="btn btn-primary">
+            <i class="fas fa-arrow-right"></i>
+            ข้อต่อไป
+          </button>
+          <a href="student_dashboard.php" class="btn btn-danger" onclick="return confirm('คุณแน่ใจหรือไม่ที่จะยกเลิกการทำแบบทดสอบ?')">
+            <i class="fas fa-times"></i>
+            ยกเลิก
+          </a>
+        </div>
+      </form>
+
+    <?php elseif ($SHOW_RESULT): ?>
+      <div class="result-container">
+        <div class="result-icon">
+          <i class="fas fa-trophy"></i>
+        </div>
+        
+        <h1 class="result-title">ผลลัพธ์ของคุณ</h1>
+        <p class="lead">ระบบแนะนำกลุ่มวิชาที่เหมาะกับคุณ</p>
+        
+        <div class="result-group">
+          <i class="fas fa-star"></i>
+          <?= $RESULT_GROUP_NAME ? h($RESULT_GROUP_NAME) : ('กลุ่มที่ '.(int)$RESULT_GROUP) ?>
+        </div>
+
+        <?php if (!empty($RESULT_SUBJECTS)): ?>
+          <div class="subjects-container">
+            <div class="subjects-title">
+              <i class="fas fa-book-open"></i>
+              รายวิชาที่แนะนำในกลุ่มนี้
+            </div>
+            <ul class="subjects-list">
+              <?php foreach ($RESULT_SUBJECTS as $row): ?>
+                <li><?= h($row['subject_name']) ?></li>
+              <?php endforeach; ?>
+            </ul>
+          </div>
+        <?php endif; ?>
+
+        <div class="actions">
+          <a href="quiz.php" class="btn btn-primary">
+            <i class="fas fa-redo"></i>
+            ทำแบบทดสอบใหม่
+          </a>
+          <a href="student_dashboard.php" class="btn btn-success">
+            <i class="fas fa-home"></i>
+            กลับหน้าแดชบอร์ด
+          </a>
+        </div>
+      </div>
+
+    <?php endif; ?>
+
+  </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const card = document.querySelector('.card');
+    if (card) card.classList.add('fade-in');
+
+    const form = document.querySelector('form');
+    if (form) {
+        form.addEventListener('submit', function() {
+            const submitBtn = form.querySelector('button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.innerHTML = '<span class="loading"></span> กำลังประมวลผล...';
+                submitBtn.disabled = true;
+            }
+        });
+    }
+
+    const answerLabels = document.querySelectorAll('.answer-label');
+    answerLabels.forEach(label => {
+        label.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-2px)';
+            this.style.boxShadow = '0 8px 25px rgba(37, 99, 235, 0.15)';
+        });
+        label.addEventListener('mouseleave', function() {
+            if (!this.previousElementSibling.checked) {
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = 'none';
+            }
+        });
+    });
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && e.target.type === 'radio') {
+        e.target.closest('form').submit();
+    }
+});
+</script>
+
 </body>
 </html>

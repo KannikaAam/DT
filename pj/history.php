@@ -1,6 +1,6 @@
 <?php
 session_start();
-include 'db_connect.php'; // เชื่อมต่อฐานข้อมูล
+include 'db_connect.php'; // เชื่อมต่อฐานข้อมูล (mysqli -> $conn)
 
 if (!isset($_SESSION['student_id'])) {
     header("Location: login.php");
@@ -8,58 +8,124 @@ if (!isset($_SESSION['student_id'])) {
 }
 
 $student_id = $_SESSION['student_id'];
-$full_name = 'ไม่พบชื่อ'; // Default value
-$profile_picture_src = ''; // Default avatar URL
-$gender = ''; // Default gender
+$full_name = 'ไม่พบชื่อ';
+$profile_picture_src = '';
+$gender = '';
 
-// ดึงข้อมูลชื่อ, รูปโปรไฟล์, และเพศของนักศึกษา โดยใช้ Prepared Statement และ JOIN ตาราง
-$sql_student_info = "SELECT p.full_name, p.profile_picture, p.gender 
-                     FROM personal_info p 
-                     INNER JOIN education_info e ON p.id = e.personal_id 
+/* ----------------- helper: safe html ----------------- */
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+
+/* ----------------- โหลดชื่อ/รูป/เพศ ----------------- */
+$sql_student_info = "SELECT p.full_name, p.profile_picture, p.gender
+                     FROM personal_info p
+                     INNER JOIN education_info e ON p.id = e.personal_id
                      WHERE e.student_id = ?";
 $stmt_student_info = $conn->prepare($sql_student_info);
-
 if ($stmt_student_info) {
     $stmt_student_info->bind_param("s", $student_id);
     $stmt_student_info->execute();
-    $result_student_info = $stmt_student_info->get_result();
+    $res = $stmt_student_info->get_result();
+    if ($res && $res->num_rows === 1) {
+        $row = $res->fetch_assoc();
+        $full_name = h($row['full_name'] ?? 'ไม่ระบุชื่อ');
+        $genderRaw = $row['gender'] ?? '';
+        $gender = mb_strtolower($genderRaw, 'UTF-8');
 
-    if ($result_student_info && $result_student_info->num_rows == 1) {
-        $student_data = $result_student_info->fetch_assoc();
-        $full_name = htmlspecialchars($student_data['full_name'] ?? 'ไม่ระบุชื่อ');
-        $gender = strtolower($student_data['gender'] ?? '');
-
-        // กำหนดแหล่งที่มาของรูปโปรไฟล์
-        if (!empty($student_data['profile_picture']) && file_exists('uploads/profile_images/' . $student_data['profile_picture'])) {
-            $profile_picture_src = 'uploads/profile_images/' . htmlspecialchars($student_data['profile_picture']);
+        if (!empty($row['profile_picture']) && file_exists('uploads/profile_images/' . $row['profile_picture'])) {
+            $profile_picture_src = 'uploads/profile_images/' . h($row['profile_picture']);
         } else {
-            // ใช้ UI-Avatars หากไม่มีรูปโปรไฟล์ หรือรูปไม่พบ
-            $avatar_background = ($gender == 'ชาย' || $gender == 'male' || $gender == 'ม') ? '3498db' : (($gender == 'หญิง' || $gender == 'female' || $gender == 'ฟ') ? 'e91e63' : '9b59b6');
-            $profile_picture_src = 'https://ui-avatars.com/api/?name=' . urlencode($full_name ?: 'Student') .
-                '&background=' . $avatar_background .
-                '&color=ffffff&size=150&font-size=0.6&rounded=true';
+            // UI-Avatars fallback
+            $avatar_bg =
+                ($gender === 'ชาย' || $gender === 'male') ? '3498db' :
+                (($gender === 'หญิง' || $gender === 'female') ? 'e91e63' : '9b59b6');
+            $profile_picture_src = 'https://ui-avatars.com/api/?name=' . urlencode($full_name ?: 'Student')
+                . '&background=' . $avatar_bg . '&color=ffffff&size=150&font-size=0.6&rounded=true';
         }
     }
     $stmt_student_info->close();
 }
 
-// ดึงข้อมูลประวัติการทำแบบทดสอบจากตาราง test_history โดยใช้ Prepared Statement
-$history_sql = "SELECT timestamp, recommended_group, recommended_subjects, no_count 
-                FROM test_history 
-                WHERE username = ? 
-                ORDER BY timestamp DESC";
-$stmt_history = $conn->prepare($history_sql);
-
-$history_result = null; // Initialize to null
-if ($stmt_history) {
-    $stmt_history->bind_param("s", $student_id);
-    $stmt_history->execute();
-    $history_result = $stmt_history->get_result();
-} else {
-    // กรณีเกิดข้อผิดพลาดในการเตรียม Statement สำหรับประวัติ
-    error_log("Error preparing history statement: " . $conn->error);
+/* ----------------- helper: schema check ----------------- */
+function db_name(mysqli $conn): string {
+    $db = 'studentregistration';
+    if ($r = $conn->query("SELECT DATABASE() AS dbname")) {
+        if ($rw = $r->fetch_assoc()) { $db = $rw['dbname'] ?: $db; }
+    }
+    return $db;
+}
+function has_table(mysqli $conn, string $db, string $table): bool {
+    $sql = "SELECT COUNT(*) AS c FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?";
+    $st = $conn->prepare($sql);
+    $st->bind_param('ss', $db, $table);
+    $st->execute();
+    $c = 0;
+    if ($g = $st->get_result()) { $c = (int)$g->fetch_assoc()['c']; }
+    $st->close();
+    return $c > 0;
+}
+function has_col(mysqli $conn, string $db, string $table, string $col): bool {
+    $sql = "SELECT COUNT(*) AS c FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?";
+    $st = $conn->prepare($sql);
+    $st->bind_param('sss', $db, $table, $col);
+    $st->execute();
+    $c = 0;
+    if ($g = $st->get_result()) { $c = (int)$g->fetch_assoc()['c']; }
+    $st->close();
+    return $c > 0;
 }
 
+$db = db_name($conn);
+
+/* ----------------- คิวรีประวัติแบบ auto-detect ----------------- */
+$history_result = null;
+$history_error = '';
+
+if (has_table($conn, $db, 'test_history')) {
+    // เดาว่าคอลัมน์ "รหัสนักศึกษา" ชื่ออะไร
+    $idCandidates = ['student_id', 'username', 'user_id', 'sid', 'stu_id', 'student_code', 'std_id', 'std_code'];
+    $idCol = null;
+    foreach ($idCandidates as $c) {
+        if (has_col($conn, $db, 'test_history', $c)) { $idCol = $c; break; }
+    }
+
+    // เดาว่าคอลัมน์วันที่ชื่ออะไร
+    $timeCandidates = ['timestamp', 'created_at', 'taken_at', 'updated_at', 'createdAt'];
+    $timeCol = null;
+    foreach ($timeCandidates as $c) {
+        if (has_col($conn, $db, 'test_history', $c)) { $timeCol = $c; break; }
+    }
+    if (!$timeCol) $timeCol = 'timestamp'; // เผื่อไว้ ใช้ใน ORDER BY ถ้าไม่มีจริงจะ error → ด้านล่างเราป้องกันอีกชั้น
+
+    // คอลัมน์คอนเทนต์
+    $cols = [];
+    // เวลา
+    if (has_col($conn, $db, 'test_history', $timeCol)) $cols[] = "`$timeCol` AS dt";
+    // กลุ่มที่แนะนำ
+    if (has_col($conn, $db, 'test_history', 'recommended_group')) $cols[] = "recommended_group";
+    // วิชาที่แนะนำ
+    if (has_col($conn, $db, 'test_history', 'recommended_subjects')) $cols[] = "recommended_subjects";
+
+    if ($idCol && !empty($cols)) {
+        $sel = implode(', ', $cols);
+        $order = has_col($conn, $db, 'test_history', $timeCol) ? "ORDER BY `$timeCol` DESC" : "";
+
+        $history_sql = "SELECT $sel FROM test_history WHERE `$idCol` = ? $order";
+        $stmt_history = $conn->prepare($history_sql);
+        if ($stmt_history) {
+            $stmt_history->bind_param("s", $student_id);
+            $stmt_history->execute();
+            $history_result = $stmt_history->get_result();
+            $stmt_history->close();
+        } else {
+            $history_error = "ไม่สามารถเตรียมคำสั่งอ่านประวัติได้: " . h($conn->error);
+        }
+    } else {
+        $history_error = "พบตาราง test_history แต่ไม่รู้ชื่อคอลัมน์รหัสนักศึกษาหรือคอลัมน์ข้อมูล (ลองตรวจ schema ของ test_history)";
+    }
+} else {
+    $history_error = "ไม่พบตาราง test_history — หน้านี้จึงยังแสดงประวัติไม่ได้";
+}
 ?>
 <!DOCTYPE html>
 <html lang="th">
@@ -69,401 +135,50 @@ if ($stmt_history) {
   <title>ประวัติการใช้งาน</title>
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
-        :root {
-            --primary-color: #3498db;
-            --secondary-color: #2980b9;
-            --accent-color: #f39c12;
-            --success-color: #27ae60;
-            --warning-color: #e74c3c;
-            --text-color: #333;
-            --light-bg: #f9f9f9;
-            --border-radius: 8px;
-            --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Prompt', sans-serif;
-        }
-        
-        body {
-            background-color: #f5f7fa;
-            color: var(--text-color);
-            line-height: 1.6;
-        }
-        
-        .navbar {
-            background-color: var(--primary-color);
-            padding: 15px 30px;
-            color: white;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        }
-        
-        .navbar-brand {
-            font-size: 20px;
-            font-weight: bold;
-        }
-        
-        .navbar-user {
-            display: flex;
-            align-items: center;
-        }
-        
-        .user-info {
-            margin-right: 20px;
-            text-align: right;
-        }
-        
-        .user-name {
-            font-weight: bold;
-            font-size: 14px;
-        }
-        
-        .user-id {
-            font-size: 12px;
-            opacity: 0.9;
-        }
-        
-        .logout-btn {
-            background-color: rgba(255, 255, 255, 0.2);
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: var(--border-radius);
-            cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s;
-            text-decoration: none;
-        }
-        
-        .logout-btn:hover {
-            background-color: rgba(255, 255, 255, 0.3);
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 30px auto;
-            padding: 0 20px;
-        }
-        
-        .dashboard-header {
-            margin-bottom: 30px;
-        }
-        
-        .dashboard-header h1 {
-            font-size: 28px;
-            color: var(--secondary-color);
-            margin-bottom: 10px;
-        }
-        
-        .dashboard-header p {
-            color: #7f8c8d;
-        }
-        
-        .action-buttons {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 30px;
-            flex-wrap: wrap;
-        }
-        
-        .btn {
-            padding: 12px 20px;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            transition: all 0.3s;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            color: #374151;
-            background: white;
-            position: relative;
-            overflow: hidden;
-        }
-        
-        .btn-primary {
-            border-left: 3px solid #3b82f6;
-        }
-        .btn-primary:hover {
-            background: #f8faff;
-            border-left-color: #2563eb;
-        }
-        
-        .btn-success {
-            border-left: 3px solid #10b981;
-        }
-        
-        .btn-success:hover {
-            background: #f0fdf4;
-            border-left-color: #059669;
-        }
-        
-        .btn-warning {
-            border-left: 3px solid #f59e0b;
-        }
-
-        .btn-warning:hover {
-            background: #fffbeb;
-            border-left-color: #d97706;
-        }
-
-        .btn-info {
-            border-left: 3px solid #8b5cf6;
-        }
-
-        .btn-info:hover {
-            background: #faf5ff;
-            border-left-color: #7c3aed;
-        }
-        
-        .alert {
-            padding: 15px;
-            border-radius: var(--border-radius);
-            margin-bottom: 20px;
-            border-left: 4px solid;
-        }
-        
-        .alert-warning {
-            background-color: #fff3cd;
-            border-color: var(--accent-color);
-            color: #856404;
-        }
-        
-        .card {
-            background-color: white;
-            border-radius: var(--border-radius);
-            box-shadow: var(--box-shadow);
-            padding: 20px;
-        }
-        
-        .card-header {
-            border-bottom: 1px solid #eee;
-            padding-bottom: 15px;
-            margin-bottom: 15px;
-        }
-        
-        .card-title {
-            font-size: 18px;
-            color: var(--secondary-color);
-        }
-        
-        .info-item {
-            display: flex;
-            margin-bottom: 12px;
-            padding: 8px 0;
-            border-bottom: 1px solid #f8f9fa;
-        }
-        
-        .info-label {
-            font-weight: bold;
-            width: 180px;
-            color: var(--text-color);
-            font-size: 14px;
-        }
-        
-        .info-value {
-            flex: 1;
-            color: #555;
-            font-size: 14px;
-            min-height: 20px;
-        }
-        
-        .info-value.empty {
-            color: #999;
-            font-style: italic;
-        }
-        
-        .student-profile {
-            display: grid;
-            grid-template-columns: 1fr 2fr; /* ปรับให้เหมาะสม */
-            gap: 20px;
-        }
-        
-        .profile-image {
-            text-align: center;
-            padding: 20px;
-        }
-        
-        .profile-image img {
-            width: 150px;
-            height: 150px;
-            border-radius: 50%;
-            object-fit: cover;
-            border: 5px solid #f5f7fa;
-            box-shadow: var(--box-shadow);
-            transition: transform 0.3s ease;
-        }
-        
-        .profile-image img:hover {
-            transform: scale(1.05);
-        }
-        
-        .profile-status {
-            margin-top: 10px;
-            padding: 5px 10px;
-            border-radius: 15px;
-            font-size: 12px;
-            display: inline-block;
-        }
-        
-        .profile-status.default {
-            background-color: #e3f2fd;
-            color: #1976d2;
-        }
-        
-        .profile-status.uploaded {
-            background-color: #e8f5e8;
-            color: #2e7d32;
-        }
-        
-        .profile-details {
-            padding: 20px 0;
-        }
-        
-        .section-title {
-            font-size: 18px;
-            color: var(--secondary-color);
-            margin: 20px 0 15px 0;
-            padding-bottom: 8px;
-            border-bottom: 2px solid var(--primary-color);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .section-title:first-child {
-            margin-top: 0;
-        }
-        
-        .icon {
-            width: 20px;
-            height: 20px;
-            display: inline-block;
-        }
-        
-        /* Table Styles for history */
-        .card-body table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-            font-size: 14px;
-        }
-        .card-body th, .card-body td {
-            border: 1px solid #e0e0e0;
-            padding: 12px;
-            text-align: left;
-            vertical-align: top;
-        }
-        .card-body th {
-            background-color: #f2f2f2;
-            font-weight: 600;
-            color: #555;
-        }
-        .card-body tbody tr:nth-child(even) {
-            background-color: #f9f9f9;
-        }
-        .card-body tbody tr:hover {
-            background-color: #eaf6ff;
-        }
-        .card-body td:last-child {
-            text-align: center; /* For 'no_count' column */
-        }
-        .card-body p { /* For "no history" message */
-            text-align: center;
-            padding: 20px;
-            color: #7f8c8d;
-            font-style: italic;
-        }
-
-        @media (max-width: 768px) {
-            .student-profile {
-                grid-template-columns: 1fr;
-            }
-            
-            .profile-image img {
-                width: 120px;
-                height: 120px;
-            }
-            
-            .navbar {
-                flex-direction: column;
-                text-align: center;
-                padding: 15px;
-            }
-            
-            .navbar-user {
-                margin-top: 10px;
-                flex-direction: column;
-            }
-            
-            .user-info {
-                margin-right: 0;
-                margin-bottom: 10px;
-                text-align: center;
-            }
-            
-            .action-buttons {
-                flex-direction: column;
-            }
-            
-            .btn {
-                text-align: center;
-                justify-content: center;
-            }
-            
-            .info-item {
-                flex-direction: column;
-            }
-            
-            .info-label {
-                width: 100%;
-                margin-bottom: 5px;
-            }
-
-            /* Responsive table */
-            .card-body table, .card-body thead, .card-body tbody, .card-body th, .card-body td, .card-body tr {
-                display: block;
-            }
-            .card-body thead tr {
-                position: absolute;
-                top: -9999px;
-                left: -9999px;
-            }
-            .card-body tr { border: 1px solid #e0e0e0; margin-bottom: 10px; }
-            .card-body td {
-                border: none;
-                border-bottom: 1px solid #eee;
-                position: relative;
-                padding-left: 50%;
-                text-align: right;
-            }
-            .card-body td:before {
-                position: absolute;
-                top: 0;
-                left: 6px;
-                width: 45%;
-                padding-right: 10px;
-                white-space: nowrap;
-                text-align: left;
-                font-weight: bold;
-                color: #555;
-            }
-            /* Label the data */
-            .card-body td:nth-of-type(1):before { content: "วันที่:"; }
-            .card-body td:nth-of-type(2):before { content: "กลุ่มที่แนะนำ:"; }
-            .card-body td:nth-of-type(3):before { content: "รายวิชาที่แนะนำ:"; }
-            .card-body td:nth-of-type(4):before { content: "จำนวน \"ไม่ใช่\":"; }
-        }
-    </style>
+    :root{--primary:#3498db;--secondary:#2980b9;--text:#333;--shadow:0 4px 6px rgba(0,0,0,.1);--radius:8px;}
+    *{margin:0;padding:0;box-sizing:border-box;font-family:'Prompt',sans-serif}
+    body{background:#f5f7fa;color:var(--text);line-height:1.6}
+    .navbar{background:var(--primary);padding:15px 30px;color:#fff;display:flex;justify-content:space-between;align-items:center;box-shadow:var(--shadow)}
+    .navbar-brand{font-size:20px;font-weight:bold}
+    .navbar-user{display:flex;align-items:center}
+    .user-info{margin-right:20px;text-align:right}
+    .user-name{font-weight:bold;font-size:14px}
+    .user-id{font-size:12px;opacity:.9}
+    .logout-btn{background:rgba(255,255,255,.2);color:#fff;border:none;padding:8px 15px;border-radius:8px;cursor:pointer;font-size:14px;text-decoration:none}
+    .logout-btn:hover{background:rgba(255,255,255,.3)}
+    .container{max-width:1200px;margin:30px auto;padding:0 20px}
+    .dashboard-header{margin-bottom:30px}
+    .dashboard-header h1{font-size:28px;color:var(--secondary);margin-bottom:10px}
+    .card{background:#fff;border-radius:8px;box-shadow:var(--shadow);padding:20px}
+    .card-header{border-bottom:1px solid #eee;padding-bottom:12px;margin-bottom:12px}
+    .card-title{font-size:18px;color:var(--secondary)}
+    .action-buttons{display:flex;gap:15px;margin:20px 0 30px;flex-wrap:wrap}
+    .btn{padding:12px 20px;text-decoration:none;font-size:14px;font-weight:500;border:1px solid #e5e7eb;border-radius:8px;transition:.2s;display:inline-flex;align-items:center;gap:8px;color:#374151;background:#fff}
+    .btn:hover{background:#f8fafc}
+    .btn-primary{border-left:3px solid #3b82f6}
+    .btn-success{border-left:3px solid #10b981}
+    .btn-warning{border-left:3px solid #f59e0b}
+    .btn-info{border-left:3px solid #8b5cf6}
+    .table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
+    .table th,.table td{border:1px solid #e5e7eb;padding:12px;text-align:left;vertical-align:top}
+    .table th{background:#f2f2f2;font-weight:600;color:#555}
+    .table tbody tr:nth-child(even){background:#f9f9f9}
+    .table tbody tr:hover{background:#eaf6ff}
+    .alert{padding:12px 14px;border-left:4px solid #f59e0b;background:#fff7ed;color:#92400e;border-radius:8px;margin-bottom:12px}
+    @media (max-width:768px){
+      .navbar{flex-direction:column;text-align:center}
+      .navbar-user{margin-top:10px;flex-direction:column}
+      .user-info{margin:0 0 10px 0;text-align:center}
+      .table,.table thead,.table tbody,.table th,.table td,.table tr{display:block}
+      .table thead tr{position:absolute;top:-9999px;left:-9999px}
+      .table tr{border:1px solid #e0e0e0;margin-bottom:10px}
+      .table td{border:none;border-bottom:1px solid #eee;position:relative;padding-left:50%;text-align:right}
+      .table td:before{position:absolute;top:0;left:6px;width:45%;padding-right:10px;white-space:nowrap;text-align:left;font-weight:700;color:#555}
+      .table td:nth-of-type(1):before{content:"วันที่";}
+      .table td:nth-of-type(2):before{content:"กลุ่มที่แนะนำ";}
+      .table td:nth-of-type(3):before{content:"รายวิชาที่แนะนำ";}
+    }
+  </style>
 </head>
 <body>
 <div class="navbar">
@@ -471,7 +186,7 @@ if ($stmt_history) {
   <div class="navbar-user">
     <div class="user-info">
       <div class="user-name"><?php echo $full_name; ?></div>
-      <div class="user-id">รหัสนักศึกษา: <?php echo htmlspecialchars($student_id); ?></div>
+      <div class="user-id">รหัสนักศึกษา: <?php echo h($student_id); ?></div>
     </div>
     <a href="index.php" class="logout-btn">ออกจากระบบ</a>
   </div>
@@ -484,10 +199,10 @@ if ($stmt_history) {
   </div>
 
   <div class="action-buttons">
-    <a href="student_dashboard.php" class="btn btn-primary"><span class="icon">🏠</span> กลับหน้าหลัก</a>
-    <a href="edit_profile.php" class="btn btn-success"><span class="icon">✏️</span> แก้ไขข้อมูลส่วนตัว</a>
-    <a href="history.php" class="btn btn-warning"><span class="icon">📋</span> ประวัติการใช้งาน</a>
-    <a href="quiz.php" class="btn btn-info"><span class="icon">📝</span> ทำแบบทดสอบ</a>
+    <a href="student_dashboard.php" class="btn btn-primary">🏠 กลับหน้าหลัก</a>
+    <a href="edit_profile.php" class="btn btn-success">✏️ แก้ไขข้อมูลส่วนตัว</a>
+    <a href="history.php" class="btn btn-warning">📋 ประวัติการใช้งาน</a>
+    <a href="quiz.php" class="btn btn-info">📝 ทำแบบทดสอบ</a>
   </div>
 
   <div class="card">
@@ -495,33 +210,36 @@ if ($stmt_history) {
       <h2 class="card-title">ประวัติการทำแบบทดสอบ</h2>
     </div>
     <div class="card-body">
+      <?php if ($history_error): ?>
+        <div class="alert">ℹ️ <?php echo $history_error; ?></div>
+      <?php endif; ?>
+
       <?php if ($history_result && $history_result->num_rows > 0): ?>
-      <table>
-        <thead>
-          <tr>
-            <th>วันที่/เวลา</th>
-            <th>กลุ่มที่แนะนำ</th>
-            <th>รายวิชาที่แนะนำ</th>
-            <th>จำนวน "ไม่ใช่"</th>
-          </tr>
-        </thead>
-        <tbody>
-          <?php while ($row = $history_result->fetch_assoc()): ?>
-          <tr>
-            <td><?= htmlspecialchars($row['timestamp']) ?></td>
-            <td><?= htmlspecialchars($row['recommended_group']) ?></td>
-            <td><?= nl2br(htmlspecialchars($row['recommended_subjects'])) ?></td>
-            <td><?= htmlspecialchars($row['no_count']) ?></td>
-          </tr>
-          <?php endwhile; ?>
-        </tbody>
-      </table>
-      <?php else: ?>
-      <p>ยังไม่มีประวัติการทำแบบทดสอบในขณะนี้ ข้อมูลจะปรากฏขึ้นที่นี่เมื่อคุณทำแบบทดสอบเสร็จสิ้น</p>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>วันที่/เวลา</th>
+              <th>กลุ่มที่แนะนำ</th>
+              <th>รายวิชาที่แนะนำ</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php while($r = $history_result->fetch_assoc()): ?>
+              <tr>
+                <td><?php echo h($r['dt'] ?? ($r['timestamp'] ?? '')); ?></td>
+                <td><?php echo h($r['recommended_group'] ?? ''); ?></td>
+                <td><?php echo nl2br(h($r['recommended_subjects'] ?? '')); ?></td>
+              </tr>
+            <?php endwhile; ?>
+          </tbody>
+        </table>
+      <?php elseif (!$history_error): ?>
+        <p style="text-align:center;color:#7f8c8d;font-style:italic;padding:18px">
+          ยังไม่มีประวัติการทำแบบทดสอบในขณะนี้ ข้อมูลจะปรากฏขึ้นเมื่อคุณทำแบบทดสอบเสร็จสิ้น
+        </p>
       <?php endif; ?>
     </div>
   </div>
 </div>
-
 </body>
 </html>

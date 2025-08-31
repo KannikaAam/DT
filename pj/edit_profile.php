@@ -44,7 +44,7 @@ $sql = "SELECT
           p.id AS personal_id, p.full_name, p.birthdate, p.gender, p.citizen_id,
           p.address, p.phone, p.email, p.profile_picture,
           e.student_id, e.faculty, e.major, e.education_level,
-          e.curriculum_name, e.program_type, e.curriculum_year,
+          e.curriculum_name, e.program_type, e.education_year,
           e.student_group, e.gpa, e.student_status, e.education_term, e.education_year
         FROM personal_info p
         INNER JOIN education_info e ON p.id = e.personal_id
@@ -74,10 +74,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
 
   $faculty         = trim($_POST['faculty'] ?? '');
   $major           = trim($_POST['major'] ?? '');
+  $program         = trim($_POST['program'] ?? '');
   $education_level = trim($_POST['education_level'] ?? '');
   $curriculum_name = trim($_POST['curriculum_name'] ?? '');
   $program_type    = trim($_POST['program_type'] ?? '');
-  $curriculum_year = trim($_POST['curriculum_year'] ?? '');
+  $education_year = trim($_POST['education_year'] ?? '');
   $student_group   = trim($_POST['student_group'] ?? '');
   $gpa_in          = trim($_POST['gpa'] ?? '');
   $student_status          = trim($_POST['student_status'] ?? '');
@@ -91,7 +92,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
   if ($citizen_id!=='' && (!ctype_digit($citizen_id) || strlen($citizen_id)!==13)) $validation[] = "รหัสบัตรประชาชนต้องเป็นตัวเลข 13 หลัก";
   if ($phone!=='' && !preg_match('/^[0-9+\-\s().]+$/', $phone)) $validation[] = "เบอร์โทรศัพท์ไม่ถูกต้อง";
   if ($gpa_in!=='' && (!is_numeric($gpa_in) || $gpa_in<0 || $gpa_in>4)) $validation[] = "เกรดเฉลี่ยต้องเป็นตัวเลข 0–4";
-  if ($curriculum_year!=='' && !preg_match('/^\d{4}$/', $curriculum_year)) $validation[] = "ปีหลักสูตรไม่ถูกต้อง";
+  if ($education_year!=='' && !preg_match('/^\d{4}$/', $education_year)) $validation[] = "ปีหลักสูตรไม่ถูกต้อง";
 
   // อัปโหลดรูปโปรไฟล์ (ถ้ามี)
   $profile_picture = $student['profile_picture'] ?? '';
@@ -147,14 +148,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
 
       // update education_info (gpa = NULLIF(?, ''))
       $sql2 = "UPDATE education_info
-               SET faculty=?, major=?, education_level=?, curriculum_name=?,
-                   program_type=?, curriculum_year=?, student_group=?,
+               SET faculty=?, major=?,program=?, education_level=?, curriculum_name=?,
+                   program_type=?, education_year=?, student_group=?,
                    gpa = NULLIF(?, ''), student_status=?, education_term=?, education_year=?
                WHERE personal_id=?";
       $st2 = $conn->prepare($sql2);
       $st2->bind_param('sssssssssssi',
         $faculty, $major, $education_level, $curriculum_name,
-        $program_type, $curriculum_year, $student_group,
+        $program_type, $education_year, $student_group,
         $gpa_str, $student_status, $education_term, $education_year,
         $student['personal_id']
       );
@@ -587,7 +588,7 @@ textarea.form-control {
     </select>
   </div>
   <div class="form-group">
-    <label class="form-label" for="major">สาขาวิชา</label>
+    <label class="form-label" for="major">สาขา</label>
     <select class="form-select" id="major" name="major"
             data-current="<?php echo h($student['major'] ?? ''); ?>">
       <option value="">— เลือกสาขา —</option>
@@ -595,7 +596,14 @@ textarea.form-control {
     <div class="form-note">สาขาจะขึ้นตามคณะที่เลือก</div>
   </div>
 </div>
-
+<div class="form-group">
+    <label class="form-label" for="program">สาขาวิชา</label>
+    <select class="form-select" id="program" name="program"
+            data-current="<?php echo h($student['program'] ?? ''); ?>">
+      <option value="">— เลือกสาขาวิชา —</option>
+    </select>
+    <div class="form-note">สาขาวิชาจะขึ้นตามคณะที่เลือก</div>
+  </div>
 <!-- ระดับ / ชื่อหลักสูตร -->
 <div class="form-row">
   <div class="form-group">
@@ -624,9 +632,9 @@ textarea.form-control {
     </select>
   </div>
   <div class="form-group">
-    <label class="form-label" for="curriculum_year">ปีหลักสูตร (พ.ศ.)</label>
-    <select class="form-select" id="curriculum_year" name="curriculum_year"
-            data-current="<?php echo h($student['curriculum_year'] ?? ''); ?>">
+    <label class="form-label" for="$education_year">ปีหลักสูตร (พ.ศ.)</label>
+    <select class="form-select" id="education_year" name="education_year"
+            data-current="<?php echo h($student['education_year'] ?? ''); ?>">
       <option value="">— เลือกปีหลักสูตร —</option>
     </select>
   </div>
@@ -779,10 +787,11 @@ function filterByParent(list, parent) {
 document.addEventListener('DOMContentLoaded', async () => {
   const $faculty   = document.getElementById('faculty');
   const $major     = document.getElementById('major');
+  const $program   = document.getElementById('program');
   const $level     = document.getElementById('education_level');
   const $curname   = document.getElementById('curriculum_name');
   const $ptype     = document.getElementById('program_type');
-  const $curyear   = document.getElementById('curriculum_year');
+  const $curyear   = document.getElementById('education_year');
   const $group     = document.getElementById('student_group');
   const $term      = document.getElementById('education_term');
   const $eduyear   = document.getElementById('education_year');
@@ -790,6 +799,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const current = {
     faculty:   $faculty?.dataset.current || '',
     major:     $major?.dataset.current || '',
+    program:   $program?.dataset.current || '',
     level:     $level?.dataset.current || '',
     curname:   $curname?.dataset.current || '',
     ptype:     $ptype?.dataset.current || '',

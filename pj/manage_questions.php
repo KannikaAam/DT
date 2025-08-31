@@ -10,7 +10,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'questions') {
     header('Content-Disposition: attachment; filename="questions_'.date('Ymd_His').'.csv"');
     echo "\xEF\xBB\xBF";
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['question_id','question_text','group_id','group_name']);
+    fputcsv($out, ['รหัสคำถาม','ข้อความคำถาม','รหัสกลุ่ม','ชื่อกลุ่ม']);
     $sql = "SELECT q.question_id, q.question_text, g.group_id, g.group_name
             FROM questions q
             LEFT JOIN subject_groups g ON q.group_id = g.group_id

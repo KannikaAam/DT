@@ -38,12 +38,14 @@ if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token']=bin2hex(random_bytes
 function flash($t,$m){ $_SESSION['flash'][]=['t'=>$t,'m'=>$m]; }
 $flashes = $_SESSION['flash'] ?? []; unset($_SESSION['flash']);
 
-/* ===== Student column helpers (for flexible schema) ===== */
+/* ===== Helpers ===== */
 function colExists(PDO $pdo, $table, $col){
   $st=$pdo->prepare("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
                      WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1");
   $st->execute([$table,$col]); return (bool)$st->fetchColumn();
 }
+
+/* ===== Student column helpers (flexible schema) ===== */
 function studentNameExpr(PDO $pdo){
   if (colExists($pdo,'students','student_name')) return 's.student_name';
   if (colExists($pdo,'students','full_name'))   return 's.full_name';
@@ -58,7 +60,23 @@ function studentCodeExpr(PDO $pdo){
   return "CAST(s.student_id AS CHAR)";
 }
 
-/* ===== Flexible form_options helpers (auto-detect columns) ===== */
+/* ===== Education_info flexible columns ===== */
+function eiStatusExpr(PDO $pdo){
+  $cands = ['status','enrollment_status','student_status'];
+  foreach($cands as $c){
+    if (colExists($pdo,'education_info',$c)) return "ei.`{$c}`";
+  }
+  return "'enrolled'";
+}
+function eiEnrollDateExpr(PDO $pdo){
+  $cands = ['created_at','enrolled_at','updated_at','reg_date'];
+  foreach($cands as $c){
+    if (colExists($pdo,'education_info',$c)) return "ei.`{$c}`";
+  }
+  return "NULL";
+}
+
+/* ===== Flexible form_options helpers ===== */
 function fo_detect_cols(PDO $pdo){
   $st = $pdo->prepare("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
                        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='form_options'");
@@ -83,8 +101,7 @@ function fo_fetch_by_type(PDO $pdo, string $type){
   if (!$val){ return []; }
 
   $sql = "SELECT {$val} AS value, {$lab} AS label FROM form_options";
-  $where = [];
-  $params = [];
+  $where = []; $params = [];
 
   if ($hasType){ $where[]="type=?"; $params[]=$type; }
   if ($hasActive){ $where[]="is_active=1"; }
@@ -100,7 +117,11 @@ function groupNameOptions(PDO $pdo){ return fo_fetch_by_type($pdo, 'student_grou
 
 /* ===== Data helpers ===== */
 function teachersList(PDO $pdo){
-  return $pdo->query("SELECT teacher_id, name AS teacher_name FROM teacher ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+  // รองรับอย่างน้อยคอลัมน์ name; ถ้ามี display_name ใช้ name แทน
+  $nameCol = colExists($pdo,'teacher','name') ? 'name' : (colExists($pdo,'teacher','display_name') ? 'display_name' : 'name');
+  $idCol   = colExists($pdo,'teacher','teacher_id') ? 'teacher_id' : 'id';
+  $stmt = $pdo->query("SELECT {$idCol} AS teacher_id, {$nameCol} AS teacher_name FROM teacher ORDER BY {$nameCol}");
+  return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
 function groupsByCurriculum(PDO $pdo, $cur, $is_admin, $is_teacher, $uid){
   $base="SELECT cg.*,
@@ -126,12 +147,14 @@ function roster(PDO $pdo, $group_id, $is_admin, $is_teacher, $uid){
   }
   $sig = groupSignature($pdo,$group_id); if(!$sig) return [];
   $nameExpr=studentNameExpr($pdo); $codeExpr=studentCodeExpr($pdo);
+  $statusExpr = eiStatusExpr($pdo); $dateExpr = eiEnrollDateExpr($pdo);
+
   $sql="SELECT s.student_id, {$codeExpr} AS student_code, {$nameExpr} AS student_name,
-               ei.status, ei.created_at AS enrollment_date
+               {$statusExpr} AS status, {$dateExpr} AS enrollment_date
         FROM education_info ei
         INNER JOIN students s ON s.student_id=ei.student_id
-        WHERE ei.curriculum_name=? AND ei.student_group=?"
-        ." ORDER BY student_name";
+        WHERE ei.curriculum_name=? AND ei.student_group=?
+        ORDER BY student_name";
   $st=$pdo->prepare($sql); $st->execute([$sig['curriculum_value'],$sig['group_name']]);
   return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
@@ -273,10 +296,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
   if (!hash_equals($_SESSION['csrf_token'],$csrf)) { flash('danger','CSRF ไม่ถูกต้อง'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
 
   $act=$_POST['action'];
-  if (in_array($act, ['add_group','edit_group','delete_group','enroll','unenroll'], true) && !$is_admin){
+  if (in_array($act, ['add_group','edit_group','delete_group','enroll','unenroll','add_teacher'], true) && !$is_admin){
     flash('danger','คุณไม่มีสิทธิ์ดำเนินการนี้'); header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
 
+  /* ---- เพิ่ม/แก้ กลุ่ม ---- */
   if ($act==='add_group' || $act==='edit_group'){
     $group_id     =(int)($_POST['group_id'] ?? 0);
     $cur          =trim($_POST['curriculum_value'] ?? '');
@@ -315,12 +339,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
 
+  /* ---- ลบกลุ่ม ---- */
   if ($act==='delete_group'){
     $gid=(int)($_POST['group_id'] ?? 0);
     $pdo->prepare("DELETE FROM course_groups WHERE group_id=?")->execute([$gid]);
     flash('ok','ลบกลุ่มเรียนเรียบร้อย'); header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
 
+  /* ---- เพิ่มนศ.เข้ากลุ่ม ---- */
   if ($act==='enroll'){
     $gid=(int)($_POST['group_id'] ?? 0);
     $ids=$_POST['student_ids'] ?? [];
@@ -345,6 +371,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
 
+  /* ---- นำนักศึกษาออกจากกลุ่ม ---- */
   if ($act==='unenroll'){
     $gid=(int)($_POST['group_id'] ?? 0);
     $sid=(int)($_POST['student_id'] ?? 0);
@@ -358,12 +385,41 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     }
     header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
+
+  /* ---- เพิ่มอาจารย์ (ใหม่) ---- */
+  if ($act==='add_teacher'){
+    $t_name  = trim($_POST['t_name'] ?? '');
+    $t_email = trim($_POST['t_email'] ?? '');
+
+    $errs=[];
+    if ($t_name==='') $errs[]='กรุณากรอกชื่ออาจารย์';
+
+    if($errs){ foreach($errs as $e) flash('danger',$e); header("Location: ".$_SERVER['PHP_SELF']); exit; }
+
+    // ตรวจคอลัมน์ที่มีอยู่จริง
+    $cols = ['name']; $vals = [$t_name]; $ph = ['?'];
+    if (colExists($pdo,'teacher','email') && $t_email!==''){ $cols[]='email'; $vals[]=$t_email; $ph[]='?'; }
+    if (colExists($pdo,'teacher','created_at')){ $cols[]='created_at'; $vals[] = date('Y-m-d H:i:s'); $ph[]='?'; }
+    if (colExists($pdo,'teacher','status')){ $cols[]='status'; $vals[] = 'active'; $ph[]='?'; }
+
+    // กันชื่อซ้ำคร่าว ๆ ถ้ามีคอลัมน์ name
+    $ck = $pdo->prepare("SELECT 1 FROM teacher WHERE name=? LIMIT 1");
+    $ck->execute([$t_name]);
+    if ($ck->fetchColumn()){ flash('danger','มีอาจารย์ชื่อนี้อยู่แล้ว'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
+
+    $sql = "INSERT INTO teacher (".implode(',',$cols).") VALUES (".implode(',',$ph).")";
+    $ins = $pdo->prepare($sql);
+    $ins->execute($vals);
+
+    flash('ok','เพิ่มอาจารย์เรียบร้อย');
+    header("Location: ".$_SERVER['PHP_SELF']); exit;
+  }
 }
 
 /* ===== Initial for rendering ===== */
-$curricula   = curriculumOptions($pdo);
-$teachers    = $is_admin ? teachersList($pdo) : [];
-$groupNames  = groupNameOptions($pdo);
+$curricula    = curriculumOptions($pdo);
+$teachers     = $is_admin ? teachersList($pdo) : [];
+$groupNames   = groupNameOptions($pdo);
 $selected_cur = $_GET['cur'] ?? ($curricula[0]['value'] ?? '');
 $groups_top   = $selected_cur ? groupsByCurriculum($pdo,$selected_cur,$is_admin,$is_teacher,$user_id) : [];
 ?>
@@ -507,6 +563,37 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
   </div>
 </div>
 
+<!-- Modal: Add Teacher (ใหม่) -->
+<div id="teacherModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>เพิ่มอาจารย์</h3>
+      <span class="close" onclick="closeModal('teacherModal')">&times;</span>
+    </div>
+    <form method="post" id="teacherForm">
+      <input type="hidden" name="csrf_token" value="<?php echo e($_SESSION['csrf_token']); ?>">
+      <input type="hidden" name="action" value="add_teacher">
+      <div class="form-grid">
+        <div class="form-field">
+          <label>ชื่ออาจารย์ <span style="color:#dc2626">*</span></label>
+          <input type="text" name="t_name" id="t_name" required placeholder="เช่น อ.สมชาย ใจดี">
+        </div>
+        <div class="form-field">
+          <label>อีเมล (ถ้ามี)</label>
+          <input type="email" name="t_email" id="t_email" placeholder="name@example.com">
+        </div>
+      </div>
+      <p class="muted" style="margin-top:6px">
+        * ระบบจะบันทึกเฉพาะคอลัมน์ที่มีอยู่จริงในตาราง <b>teacher</b> (อย่างน้อยต้องมี <b>name</b>)
+      </p>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
+        <button type="button" class="btn" onclick="closeModal('teacherModal')">ยกเลิก</button>
+        <button type="submit" class="btn secondary">เพิ่มอาจารย์</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Modal: Delete Group -->
 <div id="delGroupModal" class="modal">
   <div class="modal-content">
@@ -581,6 +668,10 @@ function openAddGroup(){
   $('gm_max').value='40';
   $('groupModal').style.display='block';
 }
+function openAddTeacher(){
+  $('t_name').value=''; $('t_email').value='';
+  $('teacherModal').style.display='block';
+}
 function openEditGroupFromBtn(btn){
   const d = btn.dataset; // id, cur, name, teacherId, max
   openEditGroup(d.id, d.cur, d.name, d.teacherId, d.max);
@@ -611,7 +702,7 @@ function loadStudentOptions(){
 <?php endif; ?>
 
 function closeModal(id){ const el=$(id); if(el) el.style.display='none'; }
-window.onclick=function(ev){ ['groupModal','delGroupModal','enrollModal'].forEach(mid=>{ const el=$(mid); if(el && ev.target===el) el.style.display='none'; }); };
+window.onclick=function(ev){ ['groupModal','teacherModal','delGroupModal','enrollModal'].forEach(mid=>{ const el=$(mid); if(el && ev.target===el) el.style.display='none'; }); };
 
 document.addEventListener('DOMContentLoaded', function () {
   loadGroupsTableForCurrentCur();

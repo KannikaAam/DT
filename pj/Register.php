@@ -23,29 +23,29 @@ $success_message = '';
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     try {
         // รับข้อมูลจากฟอร์ม
-        $full_name = trim($_POST['full_name'] ?? '');
-        $birthdate = !empty($_POST['birthdate']) ? trim($_POST['birthdate']) : null;
-        $gender = trim($_POST['gender'] ?? '');
-        $citizen_id = trim($_POST['citizen_id'] ?? '');
-        $address = trim($_POST['address'] ?? '');
-        $phone = trim($_POST['phone'] ?? '');
-        $email = trim($_POST['email'] ?? '');
+        $full_name       = trim($_POST['full_name'] ?? '');
+        $birthdate       = !empty($_POST['birthdate']) ? trim($_POST['birthdate']) : null;
+        $gender          = trim($_POST['gender'] ?? '');
+        $citizen_id      = trim($_POST['citizen_id'] ?? '');
+        $address         = trim($_POST['address'] ?? '');
+        $phone           = trim($_POST['phone'] ?? '');
+        $email           = trim($_POST['email'] ?? '');
         
-        // ข้อมูลการศึกษา (UPDATED)
-        $faculty = trim($_POST['faculty'] ?? '');
-        $major = trim($_POST['major'] ?? '');
-        $program = trim($_POST['program'] ?? ''); // <<< เพิ่มการรับค่า program
+        // ข้อมูลการศึกษา
+        $faculty         = trim($_POST['faculty'] ?? '');
+        $major           = trim($_POST['major'] ?? '');
+        $program         = trim($_POST['program'] ?? '');
         $education_level = trim($_POST['education_level'] ?? '');
-        $student_id = trim($_POST['student_id'] ?? '');
+        $student_id      = trim($_POST['student_id'] ?? '');
         $curriculum_name = trim($_POST['curriculum_name'] ?? '');
-        $program_type = trim($_POST['program_type'] ?? '');
+        $program_type    = trim($_POST['program_type'] ?? '');
         $curriculum_year = trim($_POST['curriculum_year'] ?? '');
-        $student_group = trim($_POST['student_group'] ?? '');
-        $gpa = !empty($_POST['gpa']) ? (float)$_POST['gpa'] : null;
-        $student_status = trim($_POST['student_status'] ?? 'กำลังศึกษา');
-        $education_term = trim($_POST['education_term'] ?? '');
-        $education_year = trim($_POST['education_year'] ?? '');
-        $password = $_POST['password'] ?? '';
+        $student_group   = trim($_POST['student_group'] ?? '');
+        $gpa             = isset($_POST['gpa']) && $_POST['gpa'] !== '' ? (float)$_POST['gpa'] : null;
+        $student_status  = trim($_POST['student_status'] ?? 'กำลังศึกษา');
+        $education_term  = trim($_POST['education_term'] ?? '');
+        $education_year  = trim($_POST['education_year'] ?? '');
+        $password        = $_POST['password'] ?? '';
         
         // ตรวจสอบข้อมูลที่จำเป็น
         if (empty($full_name) || empty($student_id) || empty($password)) {
@@ -77,16 +77,42 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         }
         $personal_id = $conn->insert_id;
         
-        // 2. เพิ่มข้อมูลการศึกษา (UPDATED)
-        $sql_education = "INSERT INTO education_info (personal_id, student_id, faculty, major, program, education_level, 
-                         curriculum_name, program_type, curriculum_year, student_group, gpa, student_status
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        // 2. เพิ่มข้อมูลการศึกษา (แก้ไขแล้ว ✅)
+        $sql_education = "INSERT INTO education_info (
+            personal_id,
+            student_id,
+            faculty,
+            major,
+            program,
+            education_level,
+            curriculum_name,
+            program_type,
+            curriculum_year,
+            student_group,
+            gpa,
+            student_status,
+            education_term,
+            education_year
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
         $stmt_education = $conn->prepare($sql_education);
-        // Note the updated bind_param string "isssssssssssss" and added $program
-        $stmt_education->bind_param("isssssssssssss", 
-                                   $personal_id, $student_id, $faculty, $major, $program, $education_level, 
-                                   $curriculum_name, $program_type, $curriculum_year, $student_group, 
-                                   $gpa, $student_status, $education_term, $education_year);
+        $stmt_education->bind_param(
+            "isssssssssdsss",
+            $personal_id,
+            $student_id,
+            $faculty,
+            $major,
+            $program,
+            $education_level,
+            $curriculum_name,
+            $program_type,
+            $curriculum_year,
+            $student_group,
+            $gpa,
+            $student_status,
+            $education_term,
+            $education_year
+        );
         
         if (!$stmt_education->execute()) {
             throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error);
@@ -106,12 +132,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $conn->commit();
         
         $success_message = "ลงทะเบียนสำเร็จ! ยินดีต้อนรับคุณ " . htmlspecialchars($full_name);
-        
-        // Redirect หลังจาก 3 วินาที
         header("refresh:3;url=login.php");
         
     } catch (Exception $e) {
-        // ยกเลิก Transaction
         $conn->rollback();
         $error_message = $e->getMessage();
     }
