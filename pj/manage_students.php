@@ -107,45 +107,51 @@ if (isset($_POST['update_status'])) {
 $thExists = hasTable($conn, $database, 'test_history');
 $thSidCol = null;
 if ($thExists) {
-    foreach (['student_id','studentID','sid','stu_id','student_code','std_id','std_code'] as $cand) {
+    foreach (['username','student_id','studentID','sid','stu_id','student_code','std_id','std_code'] as $cand) {
         if (hasColumn($conn, $database, 'test_history', $cand)) { $thSidCol = $cand; break; }
     }
 }
 
-/* ----------------- สร้าง SQL หลัก ----------------- */
-/*
-   ถ้ามี test_history + คอลัมน์รหัสนักศึกษา → ใช้ COUNT(*) จาก test_history เป็น quiz_attempts_live
-   ถ้าไม่มีก็ fallback ใช้ sqs.quiz_attempts เป็น quiz_attempts_live
-   (ตั้ง alias ให้ตรงกันเสมอ: quiz_attempts_live)
-*/
+/* ----------------- สร้าง SQL หลัก (มี fallback เสมอ) ----------------- */
 if ($thExists && $thSidCol) {
-$statusFilter = ""; 
-// ถ้าตารางมีคอลัมน์ status และต้องการนับเฉพาะที่ทำจบจริง ให้ปลดคอมเมนต์:
-// $statusFilter = "WHERE COALESCE(status,'completed') = 'completed'";
-
-$students_status_sql = "
-    SELECT
-        pi.full_name,
-        ei.student_id,
-        COALESCE(th.cnt, 0)                        AS quiz_attempts_live,
-        3                                          AS max_attempts,
-        COALESCE(sqs.admin_override_attempts, 0)   AS admin_override_attempts,
-        COALESCE(sqs.academic_status, 'active')    AS academic_status
-    FROM personal_info pi
-    INNER JOIN education_info ei ON pi.id = ei.personal_id
-    LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
-    LEFT JOIN (
-        SELECT TRIM(username) AS sid, COUNT(*) AS cnt
-        FROM test_history
-        GROUP BY TRIM(username)
-    ) th ON th.sid = ei.student_id
-    ORDER BY ei.student_id ASC
-";
-
+    // ใช้คอลัมน์จริงจาก $thSidCol
+    $students_status_sql = "
+        SELECT
+            pi.full_name,
+            ei.student_id,
+            COALESCE(th.cnt, 0)                        AS quiz_attempts_live,
+            3                                          AS max_attempts,
+            COALESCE(sqs.admin_override_attempts, 0)   AS admin_override_attempts,
+            COALESCE(sqs.academic_status, 'active')    AS academic_status
+        FROM personal_info pi
+        INNER JOIN education_info ei ON pi.id = ei.personal_id
+        LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
+        LEFT JOIN (
+            SELECT TRIM(`$thSidCol`) AS sid, COUNT(*) AS cnt
+            FROM test_history
+            GROUP BY TRIM(`$thSidCol`)
+        ) th ON th.sid = ei.student_id
+        ORDER BY ei.student_id ASC
+    ";
+} else {
+    // Fallback: ใช้ค่าที่ล็อกใน student_quiz_status
+    $students_status_sql = "
+        SELECT
+            pi.full_name,
+            ei.student_id,
+            COALESCE(sqs.quiz_attempts, 0)             AS quiz_attempts_live,
+            3                                          AS max_attempts,
+            COALESCE(sqs.admin_override_attempts, 0)   AS admin_override_attempts,
+            COALESCE(sqs.academic_status, 'active')    AS academic_status
+        FROM personal_info pi
+        INNER JOIN education_info ei ON pi.id = ei.personal_id
+        LEFT JOIN student_quiz_status sqs ON ei.student_id = sqs.student_id
+        ORDER BY ei.student_id ASC
+    ";
 }
+
 $students_status_result = $conn->query($students_status_sql);
 ?>
-
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -156,14 +162,16 @@ $students_status_result = $conn->query($students_status_sql);
 <style>
 :root{
   --navy:#0f1419;--steel:#1f2937;--slate:#334155;--sky:#0ea5e9;--cyan:#06b6d4;--emerald:#10b981;
-  --amber:#f59e0b;--rose:#e11d48;--text:#f1f5f9;--muted:#94a3b8;--border:#374151;
-  --glass:rgba(15,20,25,.85);--shadow:0 8px 32px rgba(0,0,0,.25);
+  --amber:#f59e0b;--rose:#e11d48;--text:#f1f5f9;--muted:#94a3b8;--subtle:#64748b;--border:#374151;
+  --glass:rgba(15,20,25,.85);--overlay:rgba(0,0,0,.6);
+  --shadow:0 4px 20px rgba(0,0,0,.15);--shadow-lg:0 8px 32px rgba(0,0,0,.25);
   --grad-primary:linear-gradient(135deg,var(--sky),var(--cyan));
   --grad-secondary:linear-gradient(135deg,var(--slate),var(--steel));
   --grad-success:linear-gradient(135deg,var(--emerald),#059669);
   --grad-danger:linear-gradient(135deg,var(--rose),#be123c);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
 body{
   font-family:'Sarabun',system-ui,Segoe UI,Roboto,Arial;
   color:var(--text);
@@ -177,7 +185,7 @@ body{
 /* Topbar */
 .topbar{position:sticky;top:0;z-index:50;display:flex;justify-content:space-between;align-items:center;gap:12px;
   padding:16px 20px;border-bottom:1px solid var(--border);
-  background:rgba(15,20,25,.85);backdrop-filter:blur(20px);box-shadow:var(--shadow);
+  background:var(--glass);backdrop-filter:blur(20px);box-shadow:var(--shadow);
 }
 .brand{display:flex;align-items:center;gap:12px}
 .logo{width:40px;height:40px;border-radius:12px;background:var(--grad-primary);display:grid;place-items:center;box-shadow:var(--shadow)}
@@ -186,30 +194,33 @@ body{
 .btn{padding:10px 14px;border-radius:12px;border:1px solid var(--border);text-decoration:none;color:var(--text);font-weight:700;
   display:inline-flex;align-items:center;gap:8px;cursor:pointer;transition:.2s ease; background:var(--grad-secondary);
 }
-.btn:hover{transform:translateY(-1px)}
+.btn:hover{transform:translateY(-1px);box-shadow:var(--shadow)}
 .btn-danger{background:var(--grad-danger);border-color:#a31d33}
 .btn-primary{background:var(--grad-primary);border-color:#1385a8;color:#fff}
 
 /* Container / cards */
 .container{max-width:1400px;margin:16px auto;padding:16px}
-.card{background:rgba(15,20,25,.85);border:1px solid var(--border);border-radius:20px;padding:18px;backdrop-filter:blur(20px);box-shadow:var(--shadow)}
+.card{
+  background:var(--glass);border:1px solid var(--border);border-radius:20px;padding:18px;backdrop-filter:blur(20px);box-shadow:var(--shadow-lg);
+}
 .header{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end;margin-bottom:12px}
 .header h1{font-size:26px;font-weight:800;background:var(--grad-primary);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 
-/* Toolbar */
+/* Toolbar (ค้นหา/กรอง/สรุป) */
 .toolbar{display:grid;grid-template-columns:1.2fr .9fr .9fr auto;gap:10px;align-items:end;margin-top:12px}
-@media (max-width: 1024px){ .toolbar{grid-template-columns:1fr 1fr;} }
-@media (max-width: 640px){ .toolbar{grid-template-columns:1fr;} }
+@media (max-width: 1024px){ .toolbar{grid-template-columns:1fr 1fr; } }
+@media (max-width: 640px){ .toolbar{grid-template-columns:1fr; } }
+
 .input, .select{
   width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--border);
   background:rgba(15,20,25,.6);color:var(--text);outline:none;
 }
-.input:focus,.select:focus{border-color:#0ea5e9;box-shadow:0 0 0 3px rgba(14,165,233,.2);}
+.input:focus,.select:focus{border-color:var(--sky);box-shadow:0 0 0 3px rgba(14,165,233,.2);}
 
 /* Alerts */
 .alert{padding:12px 14px;border-radius:12px;margin:12px 0;border:1px solid;font-weight:700;display:flex;gap:10px;align-items:center}
-.alert-success{background:rgba(16,185,129,.15);border-color:rgba(16,185,129,.3);color:#10b981}
-.alert-danger{background:rgba(225,29,72,.15);border-color:rgba(225,29,72,.3);color:#e11d48}
+.alert-success{background:rgba(16,185,129,.15);border-color:rgba(16,185,129,.3);color:var(--emerald)}
+.alert-danger{background:rgba(225,29,72,.15);border-color:rgba(225,29,72,.3);color:var(--rose)}
 
 /* Table */
 .table-wrap{position:relative;overflow:auto;border-radius:16px}
@@ -226,7 +237,7 @@ tbody tr:hover{background:rgba(14,165,233,.04)}
 .st-leave{background:#3b2407;color:#fed7aa;border-color:#9a3412}
 .st-suspended{background:#3f0a0a;color:#fecaca;border-color:#b91c1c}
 
-/* Inline inputs */
+/* Inline inputs in table */
 td input[type="number"], td select{
   width:120px; padding:8px 10px; border-radius:10px; border:1px solid var(--border);
   background:rgba(15,20,25,.55); color:var(--text);
@@ -234,11 +245,11 @@ td input[type="number"], td select{
 td .btn-update{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--grad-success);color:#fff;font-weight:800;cursor:pointer}
 td .btn-update:hover{filter:brightness(1.05)}
 
-/* Misc */
+/* Helpers */
 .tools{display:flex;gap:8px;flex-wrap:wrap}
 .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-size:12px;color:#e5e7eb}
 .fab{position:fixed;right:16px;bottom:16px;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;
-  background:var(--grad-primary);color:#fff;border:1px solid #0ea5e9;cursor:pointer;box-shadow:var(--shadow)}
+  background:var(--grad-primary);color:#fff;border:1px solid #0ea5e9;cursor:pointer;box-shadow:var(--shadow-lg)}
 .fab:hover{transform:translateY(-2px)}
 </style>
 </head>
@@ -251,13 +262,14 @@ td .btn-update:hover{filter:brightness(1.05)}
     <div class="title">แผงควบคุมสถานะนักศึกษา</div>
   </div>
   <div class="nav-actions">
-    <div style="color:#94a3b8">ยินดีต้อนรับ, <b><?php echo h($_SESSION['admin_username'] ?? 'Admin'); ?></b></div>
+    <div style="color:var(--muted)">ยินดีต้อนรับ, <b><?php echo h($_SESSION['admin_username'] ?? 'Admin'); ?></b></div>
     <a href="admin_dashboard.php" class="btn">🏠 หน้าหลัก</a>
     <a href="admin_logout.php" class="btn btn-danger">ออกจากระบบ</a>
   </div>
 </div>
 
 <div class="container">
+
   <div class="card">
     <div class="header">
       <h1>จัดการสถานะนักศึกษา</h1>
@@ -270,14 +282,14 @@ td .btn-update:hover{filter:brightness(1.05)}
     <?php if ($message): ?><div class="alert alert-success" id="flash-ok">✅ <?php echo $message; ?></div><?php endif; ?>
     <?php if ($error):   ?><div class="alert alert-danger" id="flash-bad">⚠️ <?php echo $error;   ?></div><?php endif; ?>
 
-    <!-- Toolbar: ค้นหา + กรองสถานะ + สรุป -->
+    <!-- Toolbar: ค้นหา + กรองสถานะ + สรุปจำนวน -->
     <div class="toolbar">
       <div>
-        <label for="search" style="display:block;margin-bottom:6px;color:#94a3b8;font-size:12px">ค้นหา (รหัส/ชื่อ)</label>
+        <label for="search" style="display:block;margin-bottom:6px;color:var(--muted);font-size:12px">ค้นหา (รหัส/ชื่อ)</label>
         <input id="search" class="input" type="text" placeholder="เช่น 66010001 หรือ สมชาย ใจดี">
       </div>
       <div>
-        <label for="filterStatus" style="display:block;margin-bottom:6px;color:#94a3b8;font-size:12px">กรองสถานะ</label>
+        <label for="filterStatus" style="display:block;margin-bottom:6px;color:var(--muted);font-size:12px">กรองสถานะ</label>
         <select id="filterStatus" class="select">
           <option value="">— แสดงทั้งหมด —</option>
           <option value="active">กำลังศึกษา</option>
@@ -287,7 +299,7 @@ td .btn-update:hover{filter:brightness(1.05)}
         </select>
       </div>
       <div>
-        <label style="display:block;margin-bottom:6px;color:#94a3b8;font-size:12px">สรุป</label>
+        <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:12px">สรุป</label>
         <div class="tools" id="summary">
           <span class="badge">ทั้งหมด: <b id="sumAll">0</b></span>
           <span class="badge">กำลังศึกษา: <b id="sumActive">0</b></span>
@@ -295,7 +307,7 @@ td .btn-update:hover{filter:brightness(1.05)}
         </div>
       </div>
       <div>
-        <label style="display:block;margin-bottom:6px;color:#94a3b8;font-size:12px">เครื่องมือ</label>
+        <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:12px">เครื่องมือ</label>
         <div class="tools">
           <button class="btn btn-primary" id="clearFilters" type="button">🔄 ล้างตัวกรอง</button>
         </div>
@@ -320,13 +332,11 @@ td .btn-update:hover{filter:brightness(1.05)}
           <?php while($row = $students_status_result->fetch_assoc()):
             $sid        = $row['student_id'];
             $fullname   = $row['full_name'] ?? 'ไม่พบชื่อ';
-            $used       = (int)$row['quiz_attempts_live'];      // ใช้ไปจริง (จาก test_history หรือ fallback)
-            $BASE_LIMIT = 3;                                  // ฐานสิทธิ์
-            $allow      = $BASE_LIMIT;                        // ถ้าจะรวมสิทธิ์เพิ่มใน "สิทธิ์ทั้งหมด" ค่อยเปลี่ยนเป็น $BASE_LIMIT + $ov
-            $remain     = max(0, $allow - $used);
-
-            $ov   = (int)$row['admin_override_attempts'];
-            $ast  = $row['academic_status'] ?? 'active';
+            $used       = (int)$row['quiz_attempts_live']; // ใช้ไปจริง
+            $BASE_LIMIT = 3;
+            $remain     = max(0, $BASE_LIMIT - $used);
+            $ov         = (int)$row['admin_override_attempts'];
+            $ast        = $row['academic_status'] ?? 'active';
             $badgeCls = [
               'active'    => 'st-active',
               'graduated' => 'st-graduated',
@@ -375,24 +385,26 @@ td .btn-update:hover{filter:brightness(1.05)}
           </tr>
           <?php endwhile; ?>
         <?php else: ?>
-          <tr><td colspan="7" style="text-align:center;color:#94a3b8">ไม่พบข้อมูลนักศึกษา</td></tr>
+          <tr><td colspan="7" style="text-align:center;color:var(--muted)">ไม่พบข้อมูลนักศึกษา</td></tr>
         <?php endif; ?>
         </tbody>
       </table>
     </div>
+
   </div>
 </div>
 
+<!-- ปุ่มเลื่อนขึ้น -->
 <button class="fab" id="toTop" title="เลื่อนขึ้น">⬆️</button>
 
 <script>
-/* Alerts auto-hide */
+/* -------- Alerts auto-hide -------- */
 setTimeout(()=>{
   const ok = document.getElementById('flash-ok'); if (ok){ ok.style.transition='opacity .6s'; ok.style.opacity='0'; setTimeout(()=>ok.remove(),600); }
   const bad= document.getElementById('flash-bad'); if (bad){ bad.style.transition='opacity .6s'; bad.style.opacity='0'; setTimeout(()=>bad.remove(),600); }
 }, 4500);
 
-/* Client filters & summary */
+/* -------- Client filters & summary -------- */
 const q = document.getElementById('search');
 const fs = document.getElementById('filterStatus');
 const clearBtn = document.getElementById('clearFilters');
@@ -421,7 +433,7 @@ fs.addEventListener('change', applyFilters);
 clearBtn.addEventListener('click', ()=>{ q.value=''; fs.value=''; applyFilters(); });
 applyFilters();
 
-/* Row UX: live badge + Enter submit */
+/* -------- Row UX: live badge + Enter submit -------- */
 rows.forEach(r=>{
   const form = r.querySelector('form'); if(!form) return;
   const inputs = form.querySelectorAll('input, select');
@@ -446,7 +458,7 @@ rows.forEach(r=>{
   });
 });
 
-/* Scroll to top */
+/* -------- Scroll to top -------- */
 const toTop = document.getElementById('toTop');
 toTop.addEventListener('click', ()=>window.scrollTo({top:0, behavior:'smooth'}));
 window.addEventListener('scroll', ()=>{ toTop.style.display = (window.scrollY > 400) ? 'grid' : 'none'; });

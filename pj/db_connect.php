@@ -37,7 +37,9 @@ if ($conn->connect_error) {
 }
 
 // ตั้งค่าการเข้ารหัส UTF-8
-$conn->set_charset("utf8mb4");
+$conn->set_charset('utf8mb4');
+$conn->query("SET collation_connection = 'utf8mb4_unicode_ci'");
+
 
 // ตั้งค่า timezone
 date_default_timezone_set('Asia/Bangkok');

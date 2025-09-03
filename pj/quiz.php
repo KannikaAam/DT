@@ -116,20 +116,24 @@ function save_and_prepare_result(PDO $pdo, int $student_id, int $group_id): int 
 function saveTestHistoryPDO(PDO $pdo, string $student_id, ?string $group, ?string $subjects, int $no_count): bool {
     try {
         // สร้างตารางถ้ายังไม่มี
-        $pdo->exec("CREATE TABLE IF NOT EXISTS test_history (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(255) NOT NULL,
-            recommended_group VARCHAR(255),
-            recommended_subjects TEXT,
-            no_count INT DEFAULT 0,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS test_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(255) NOT NULL,
+                recommended_group VARCHAR(255),
+                recommended_subjects TEXT,
+                no_count INT DEFAULT 0,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        ");
 
-        $sid = $_SESSION['student_id']; // ต้องเป็นรหัสนักศึกษา
-        $stmt = $conn->prepare("
-            INSERT INTO test_history (username, recommended_group, recommended_subjects, timestamp)VALUES (?, ?, ?, NOW())");
-        $stmt->bind_param("sss", $sid, $group, $subjects_json);
-        return $st->execute([$student_id, $group, $subjects, $no_count]);
+        // บันทึกค่า (timestamp ปล่อยให้ DEFAULT ทำงาน ไม่ต้องใส่ NOW())
+        $stmt = $pdo->prepare("
+            INSERT INTO test_history (username, recommended_group, recommended_subjects, no_count)
+            VALUES (?, ?, ?, ?)
+        ");
+        return $stmt->execute([$student_id, $group, $subjects, $no_count]);
+
     } catch (PDOException $e) {
         error_log("saveTestHistoryPDO: ".$e->getMessage());
         return false;
@@ -137,7 +141,7 @@ function saveTestHistoryPDO(PDO $pdo, string $student_id, ?string $group, ?strin
 }
 
 /* =========================================================
-   PART 1: PROCESSING (รับคำตอบ/ตัดสินใจทางเดิน)
+   PART 1: PROCESSING (รับคำตอบ/ตัดสินใจทางเดิน) — แก้เฉพาะตรรกะ
    ========================================================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $qid = isset($_POST['qid']) ? (int)$_POST['qid'] : 0;
@@ -166,24 +170,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // ข้อ 12
+    // ---------- ข้อ 12 (ตาม logic ไฟล์แรก) ----------
     if ($qid == 12) {
-        if (ans(12,$a) == 1) { goto_q(14); }
-        else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1); $SHOW_RESULT = true; }
+        $is_new_unique_path_E = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
+        $is_the_problem_path  = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
+
+        if ( ($is_new_unique_path_E || $is_the_problem_path) && ans(12,$a)==1 ) {
+            goto_q(14);
+        } else {
+            $is_special_path_A = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
+            $is_special_path_B = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==1);
+            $is_special_path_C = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==1);
+            $is_special_path_D = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==1);
+
+            if ( ($is_special_path_A || $is_special_path_B || $is_special_path_C || $is_special_path_D || $is_new_unique_path_E) && ans(12,$a)==0 ) {
+                goto_q(14);
+            } else {
+                $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1);
+                $SHOW_RESULT = true;
+            }
+        }
     }
 
-    // ข้อ 13
+    // ---------- ข้อ 13 (ตาม logic ไฟล์แรก) ----------
     if (!$SHOW_RESULT && $qid == 13) {
-        if (ans(13,$a) == 0) { goto_q(14); }
-        else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1); $SHOW_RESULT = true; }
+        $path_GoTo14_Always_1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
+        $path_GoTo14_Always_2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
+        $path_GoTo14_Always_3 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
+        $path_GoTo14_Always_4 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
+
+        if ($path_GoTo14_Always_1 || $path_GoTo14_Always_2 || $path_GoTo14_Always_3 || $path_GoTo14_Always_4) {
+            goto_q(14);
+        } else {
+            $path_GoTo14_OnNo_1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
+            $path_GoTo14_OnNo_2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
+            $path_GoTo14_OnNo_3 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0);
+            $path_GoTo14_OnNo_4 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
+            $path_GoTo14_OnNo_5 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0);
+            $path_GoTo14_OnNo_6 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==1 && ans(8,$a)==1 && ans(10,$a)==0);
+            $path_GoTo14_OnNo_7 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==0 && ans(5,$a)==0 && ans(7,$a)==0 && ans(9,$a)==1 && ans(10,$a)==0);
+
+            if ( ($path_GoTo14_OnNo_1 || $path_GoTo14_OnNo_2 || $path_GoTo14_OnNo_3 || $path_GoTo14_OnNo_4 || $path_GoTo14_OnNo_5 || $path_GoTo14_OnNo_6 || $path_GoTo14_OnNo_7) && ans(13,$a)==0 ) {
+                goto_q(14);
+            } else {
+                $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 1);
+                $SHOW_RESULT = true;
+            }
+        }
     }
 
-    // กลุ่ม 2: 14–23
+    // ---------- ข้อ 14 (เส้นทางปฏิเสธ 2 เคส + ทางปกติ ตามไฟล์แรก) ----------
     if (!$SHOW_RESULT && $qid == 14) {
-        if (ans(14,$a) == 1) { goto_q(15); }
-        else { goto_q(10); } // ย้อนกลับไปสรุปกลุ่ม 1 ตามเส้นทาง 10/12/13
+        $is_rejection_path_1 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==1 && ans(6,$a)==0 && ans(9,$a)==0 && ans(11,$a)==0 && ans(13,$a)==0);
+        $is_rejection_path_2 = (ans(1,$a)==1 && ans(2,$a)==1 && ans(3,$a)==1 && ans(4,$a)==0 && ans(7,$a)==1 && ans(8,$a)==0 && ans(11,$a)==0 && ans(13,$a)==0);
+
+        if ($is_rejection_path_1 || $is_rejection_path_2) {
+            if (ans(14,$a)==0) goto_q(10);  // วนกลับไปกลุ่ม 1 (ข้อ 10)
+            else goto_q(15);                // ไปต่อ AI
+        } else {
+            if (ans(14,$a)==1) goto_q(15);
+            else goto_q(24);               // ข้ามไปกลุ่ม 3
+        }
     }
 
+    // ---------- ส่วน 15–21 (เหมือนเดิม) ----------
     if (!$SHOW_RESULT && $qid >= 15 && $qid <= 21) {
         switch ($qid) {
             case 15: (ans(15,$a)==1) ? goto_q(16) : goto_q(17); break;
@@ -196,6 +246,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // ---------- ข้อ 22 (ตามไฟล์แรก) ----------
     if (!$SHOW_RESULT && $qid == 22) {
         $L = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==0 && ans(21,$a)==1);
         if ($L && ans(22,$a)==1) { goto_q(24); }
@@ -209,17 +260,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // ---------- ข้อ 23 (ตามไฟล์แรก) ----------
     if (!$SHOW_RESULT && $qid == 23) {
         $Y1 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==1 && ans(16,$a)==0 && ans(19,$a)==0 && ans(21,$a)==0);
         $Y2 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==1 && ans(18,$a)==0 && ans(21,$a)==0);
         $Y3 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==1 && ans(20,$a)==0);
         $Y4 = (ans(1,$a)==1 && ans(2,$a)==0 && ans(14,$a)==1 && ans(15,$a)==0 && ans(17,$a)==0 && ans(19,$a)==0 && ans(21,$a)==0);
 
-        if (($Y1||$Y2||$Y3||$Y4) && ans(23,$a)==1) { goto_q(24); }
-        else { if (ans(23,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2); $SHOW_RESULT = true; } else { goto_q(24); } }
+        if (($Y1||$Y2||$Y3||$Y4) && ans(23,$a)==1) {
+            goto_q(24);
+        } else {
+            if (ans(23,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 2); $SHOW_RESULT = true; }
+            else { goto_q(24); }
+        }
     }
 
-    // กลุ่ม 3: 24–33
+    // กลุ่ม 3: 24–31 (เหมือนเดิม)
     if (!$SHOW_RESULT && $qid == 24) { (ans(24,$a)==1) ? goto_q(25) : goto_q(14); }
 
     if (!$SHOW_RESULT && $qid >= 25 && $qid <= 31) {
@@ -234,17 +290,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    // ---------- ข้อ 32 (ย้อนกลับไป “ข้อ 2” ตามไฟล์แรก ไม่ใช่ 14) ----------
     if (!$SHOW_RESULT && $qid == 32) {
         $Always = (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==0 && ans(29,$a)==0 && ans(31,$a)==1);
         $NoA = (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==1 && ans(26,$a)==0 && ans(29,$a)==0 && ans(31,$a)==1);
         $NoB = (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==1 && ans(28,$a)==0 && ans(31,$a)==1);
         $NoC = (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==0 && ans(29,$a)==1 && ans(30,$a)==1);
 
-        if ($Always) goto_q(14);
-        elseif (($NoA||$NoB||$NoC) && ans(32,$a)==0) goto_q(14);
+        if ($Always) goto_q(2);
+        elseif (($NoA||$NoB||$NoC) && ans(32,$a)==0) goto_q(2);
         else { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; }
     }
 
+    // ---------- ข้อ 33 (ย้อนกลับไป “ข้อ 2” ตามไฟล์แรก) ----------
     if (!$SHOW_RESULT && $qid == 33) {
         $A =
           (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==0 && ans(29,$a)==0 && ans(31,$a)==0) ||
@@ -262,12 +320,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==0 && ans(29,$a)==1 && ans(30,$a)==0) ||
           (ans(1,$a)==0 && ans(24,$a)==1 && ans(25,$a)==0 && ans(27,$a)==0 && ans(29,$a)==0 && ans(31,$a)==0);
 
-        if ($Force) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; }
-        elseif ( ($A && ans(33,$a)==1) || ($Back2 && ans(33,$a)==0) ) { goto_q(14); }
-        else { if (ans(33,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; } else { goto_q(14); } }
+        if ($Force) {
+            $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true;
+        } elseif ( ($A && ans(33,$a)==1) || ($Back2 && ans(33,$a)==0) ) {
+            goto_q(2);  // กลับไปถามฝั่ง 2 ตามที่กำหนด
+        } else {
+            if (ans(33,$a)==1) { $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3); $SHOW_RESULT = true; }
+            else { goto_q(2); }
+        }
     }
 
-    // Fallback: ปลอดภัยกว่า → กลับไป 14
+    // Fallback: ปลอดภัยกว่า → กลับไป 14 (คงเดิม)
     if (!$SHOW_RESULT) { goto_q(14); }
 }
 
@@ -364,12 +427,7 @@ elseif (isset($_GET['qid'])) {
 }
 
 /* ===== Reset & Base ===== */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
+* { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: 'Sarabun', sans-serif;
   background: linear-gradient(135deg, var(--primary-50) 0%, var(--primary-100) 100%);
@@ -394,513 +452,167 @@ body::before {
   animation: float 20s ease-in-out infinite;
   z-index: -1;
 }
+@keyframes float { 0%,100%{transform:translateY(0) rotate(0)} 50%{transform:translateY(-20px) rotate(5deg)} }
 
-@keyframes float {
-  0%, 100% { transform: translateY(0px) rotate(0deg); }
-  50% { transform: translateY(-20px) rotate(5deg); }
-}
-
-/* ===== Container ===== */
-.container {
-  max-width: 900px;
-  margin: 2rem auto;
-  position: relative;
-}
-
-/* ===== Card Design ===== */
+/* ===== Container & Card ===== */
+.container { max-width: 900px; margin: 2rem auto; position: relative; }
 .card {
   background: var(--white);
   border-radius: 24px;
-  box-shadow: 
-    0 20px 25px -5px var(--shadow),
-    0 10px 10px -5px var(--shadow-lg);
+  box-shadow: 0 20px 25px -5px var(--shadow), 0 10px 10px -5px var(--shadow-lg);
   padding: 3rem;
   position: relative;
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255,255,255,0.2);
   overflow: hidden;
 }
-
 .card::before {
   content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 6px;
+  position: absolute; top: 0; left: 0; right: 0; height: 6px;
   background: linear-gradient(90deg, var(--primary-500), var(--accent-500), var(--success-500));
   border-radius: 24px 24px 0 0;
 }
 
 /* ===== Typography ===== */
 h1 {
-  font-size: 2.5rem;
-  font-weight: 700;
-  color: var(--gray-900);
-  margin-bottom: 0.5rem;
+  font-size: 2.5rem; font-weight: 700; color: var(--gray-900); margin-bottom: .5rem;
   background: linear-gradient(135deg, var(--primary-600), var(--primary-500));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
 }
+.lead { font-size: 1.25rem; color: var(--gray-600); margin-bottom: 2rem; line-height: 1.6; }
 
-.lead {
-  font-size: 1.25rem;
-  color: var(--gray-600);
-  margin-bottom: 2rem;
-  line-height: 1.6;
-}
-
-.meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  margin-bottom: 2.5rem;
-  align-items: center;
-}
-
+/* ===== Badges & Buttons ===== */
+.meta { display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:2.5rem; align-items:center; }
 .badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
+  display:inline-flex; align-items:center; gap:.5rem;
   background: linear-gradient(135deg, var(--primary-100), var(--primary-50));
-  color: var(--primary-600);
-  padding: 0.5rem 1rem;
-  border-radius: 50px;
-  border: 1px solid var(--primary-200);
-  font-weight: 500;
-  font-size: 0.9rem;
+  color: var(--primary-600); padding: .5rem 1rem; border-radius: 50px;
+  border: 1px solid var(--primary-200); font-weight: 500; font-size: .9rem;
 }
+.badge i { font-size: 1rem; }
 
-.badge i {
-  font-size: 1rem;
-}
-
-/* ===== Buttons ===== */
 .btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  padding: 0.875rem 2rem;
-  border-radius: 16px;
-  font-weight: 600;
-  font-size: 1rem;
-  text-decoration: none;
-  border: none;
-  cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
-  overflow: hidden;
-  min-width: 140px;
+  display:inline-flex; align-items:center; justify-content:center; gap:.75rem;
+  padding:.875rem 2rem; border-radius:16px; font-weight:600; font-size:1rem;
+  text-decoration:none; border:none; cursor:pointer; transition:all .3s cubic-bezier(.4,0,.2,1);
+  position:relative; overflow:hidden; min-width:140px;
 }
-
 .btn::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-  transition: left 0.6s;
+  content:''; position:absolute; top:0; left:-100%; width:100%; height:100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.2), transparent);
+  transition:left .6s;
 }
-
-.btn:hover::before {
-  left: 100%;
-}
-
-.btn-primary {
-  background: linear-gradient(135deg, var(--primary-600), var(--primary-500));
-  color: var(--white);
-  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.3);
-}
-
-.btn-primary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 35px rgba(37, 99, 235, 0.4);
-}
-
-.btn-secondary {
-  background: linear-gradient(135deg, var(--gray-600), var(--gray-500));
-  color: var(--white);
-  box-shadow: 0 8px 25px rgba(75, 85, 99, 0.3);
-}
-
-.btn-secondary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 35px rgba(75, 85, 99, 0.4);
-}
-
-.btn-success {
-  background: linear-gradient(135deg, var(--success-600), var(--success-500));
-  color: var(--white);
-  box-shadow: 0 8px 25px rgba(5, 150, 105, 0.3);
-}
-
-.btn-success:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 35px rgba(5, 150, 105, 0.4);
-}
-
-.btn-outline {
-  background: transparent;
-  color: var(--primary-600);
-  border: 2px solid var(--primary-200);
-  box-shadow: none;
-}
-
-.btn-outline:hover {
-  background: var(--primary-50);
-  border-color: var(--primary-300);
-  transform: translateY(-1px);
-}
-
-.btn-danger {
-  background: linear-gradient(135deg, var(--secondary-600), var(--secondary-500));
-  color: var(--white);
-  box-shadow: 0 8px 25px rgba(220, 38, 38, 0.3);
-}
-
-.btn-danger:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 35px rgba(220, 38, 38, 0.4);
-}
-
-.btn:active {
-  transform: translateY(0);
-}
-
-.btn:focus {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
-}
+.btn:hover::before { left:100%; }
+.btn-primary { background:linear-gradient(135deg, var(--primary-600), var(--primary-500)); color:#fff; box-shadow:0 8px 25px rgba(37,99,235,.3); }
+.btn-primary:hover { transform:translateY(-2px); box-shadow:0 12px 35px rgba(37,99,235,.4); }
+.btn-outline { background:transparent; color:var(--primary-600); border:2px solid var(--primary-200); }
+.btn-outline:hover { background:var(--primary-50); border-color:var(--primary-300); transform:translateY(-1px); }
+.btn-success { background:linear-gradient(135deg, var(--success-600), var(--success-500)); color:#fff; }
+.btn-danger { background:linear-gradient(135deg, var(--secondary-600), var(--secondary-500)); color:#fff; }
 
 /* ===== Question Box ===== */
 .question-container {
   background: linear-gradient(135deg, var(--primary-50), var(--white));
-  border-radius: 20px;
-  padding: 2rem;
-  margin: 2rem 0;
-  border: 1px solid var(--primary-100);
-  position: relative;
-  overflow: hidden;
+  border-radius: 20px; padding: 2rem; margin: 2rem 0; border: 1px solid var(--primary-100);
+  position: relative; overflow: hidden;
 }
-
 .question-container::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  right: -50%;
-  width: 100%;
-  height: 100%;
-  background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+  content:''; position:absolute; top:-50%; right:-50%; width:100%; height:100%;
+  background: radial-gradient(circle, rgba(59,130,246,.1) 0%, transparent 70%);
   animation: pulse 4s ease-in-out infinite;
 }
+@keyframes pulse { 0%,100%{opacity:.5; transform:scale(1)} 50%{opacity:.8; transform:scale(1.1)} }
 
-@keyframes pulse {
-  0%, 100% { opacity: 0.5; transform: scale(1); }
-  50% { opacity: 0.8; transform: scale(1.1); }
-}
-
-.question-header {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 1.5rem;
-}
-
+.question-header { display:flex; align-items:center; gap:1rem; margin-bottom:1.5rem; }
 .question-icon {
-  width: 50px;
-  height: 50px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--primary-500), var(--primary-400));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--white);
-  font-size: 1.25rem;
-  flex-shrink: 0;
+  width:50px; height:50px; border-radius:50%;
+  background:linear-gradient(135deg, var(--primary-500), var(--primary-400));
+  display:flex; align-items:center; justify-content:center; color:#fff; font-size:1.25rem; flex-shrink:0;
 }
-
-.question-text {
-  font-size: 1.35rem;
-  font-weight: 600;
-  color: var(--gray-800);
-  line-height: 1.5;
-  position: relative;
-  z-index: 1;
-}
+.question-text { font-size:1.35rem; font-weight:600; color:var(--gray-800); line-height:1.5; }
 
 /* ===== Answer Options ===== */
-.answers {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
-  margin: 2rem 0;
-}
-
-.answer-option {
-  position: relative;
-}
-
-.answer-option input[type="radio"] {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
+.answers { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px,1fr)); gap:1.5rem; margin:2rem 0; }
+.answer-option { position:relative; }
+.answer-option input[type="radio"] { position:absolute; opacity:0; width:0; height:0; }
 .answer-label {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem;
-  border-radius: 16px;
-  border: 2px solid var(--gray-200);
-  background: var(--white);
-  cursor: pointer;
-  transition: all 0.3s ease;
-  font-size: 1.1rem;
-  font-weight: 500;
-  position: relative;
-  overflow: hidden;
+  display:flex; align-items:center; gap:1rem; padding:1.25rem 1.5rem; border-radius:16px;
+  border:2px solid var(--gray-200); background:#fff; cursor:pointer; transition:all .3s ease;
+  font-size:1.1rem; font-weight:500; position:relative; overflow:hidden;
 }
-
 .answer-label::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.1), transparent);
-  transition: left 0.5s;
+  content:''; position:absolute; top:0; left:-100%; width:100%; height:100%;
+  background: linear-gradient(90deg, transparent, rgba(59,130,246,.1), transparent);
+  transition:left .5s;
 }
-
-.answer-label:hover::before {
-  left: 100%;
-}
-
+.answer-label:hover::before { left:100%; }
 .answer-option input[type="radio"]:checked + .answer-label {
-  border-color: var(--primary-400);
-  background: linear-gradient(135deg, var(--primary-50), var(--white));
-  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.15);
-  transform: translateY(-2px);
+  border-color:var(--primary-400);
+  background:linear-gradient(135deg, var(--primary-50), #ffffff);
+  box-shadow:0 8px 25px rgba(37,99,235,.15);
+  transform:translateY(-2px);
 }
-
-.radio-custom {
-  width: 24px;
-  height: 24px;
-  border: 2px solid var(--gray-300);
-  border-radius: 50%;
-  position: relative;
-  transition: all 0.3s ease;
-  flex-shrink: 0;
-}
-
-.answer-option input[type="radio"]:checked + .answer-label .radio-custom {
-  border-color: var(--primary-500);
-  background: var(--primary-500);
-}
-
+.radio-custom { width:24px; height:24px; border:2px solid var(--gray-300); border-radius:50%; position:relative; transition:all .3s; flex-shrink:0; }
+.answer-option input[type="radio"]:checked + .answer-label .radio-custom { border-color:var(--primary-500); background:var(--primary-500); }
 .radio-custom::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--white);
-  transform: translate(-50%, -50%) scale(0);
-  transition: transform 0.3s ease;
+  content:''; position:absolute; top:50%; left:50%; width:8px; height:8px; border-radius:50%; background:#fff;
+  transform:translate(-50%,-50%) scale(0); transition:transform .3s ease;
 }
-
-.answer-option input[type="radio"]:checked + .answer-label .radio-custom::after {
-  transform: translate(-50%, -50%) scale(1);
-}
-
-.answer-text {
-  color: var(--gray-700);
-  font-weight: 500;
-}
-
-.answer-option input[type="radio"]:checked + .answer-label .answer-text {
-  color: var(--primary-600);
-  font-weight: 600;
-}
+.answer-option input[type="radio"]:checked + .answer-label .radio-custom::after { transform:translate(-50%,-50%) scale(1); }
+.answer-text { color:var(--gray-700); font-weight:500; }
+.answer-option input[type="radio"]:checked + .answer-label .answer-text { color:var(--primary-600); font-weight:600; }
 
 /* ===== Result Section ===== */
-.result-container {
-  text-align: center;
-  padding: 2rem 0;
-}
-
+.result-container { text-align:center; padding:2rem 0; }
 .result-icon {
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--success-500), var(--success-400));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--white);
-  font-size: 2rem;
-  margin: 0 auto 2rem;
-  animation: celebration 0.6s ease-out;
+  width:80px; height:80px; border-radius:50%;
+  background:linear-gradient(135deg, var(--success-500), var(--success-400));
+  display:flex; align-items:center; justify-content:center; color:#fff; font-size:2rem; margin:0 auto 2rem;
+  animation: celebration .6s ease-out;
 }
-
-@keyframes celebration {
-  0% { transform: scale(0) rotate(0deg); }
-  50% { transform: scale(1.2) rotate(180deg); }
-  100% { transform: scale(1) rotate(360deg); }
-}
-
-.result-title {
-  font-size: 2rem;
-  font-weight: 700;
-  color: var(--gray-900);
-  margin-bottom: 1rem;
-}
-
+@keyframes celebration { 0%{transform:scale(0) rotate(0)} 50%{transform:scale(1.2) rotate(180deg)} 100%{transform:scale(1) rotate(360deg)} }
+.result-title { font-size:2rem; font-weight:700; color:var(--gray-900); margin-bottom:1rem; }
 .result-group {
-  display: inline-block;
-  background: linear-gradient(135deg, var(--success-100), var(--success-50));
-  color: var(--success-600);
-  padding: 0.75rem 2rem;
-  border-radius: 50px;
-  border: 2px solid var(--success-200);
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin: 1rem 0 2rem;
+  display:inline-block; background:linear-gradient(135deg, var(--success-100), var(--success-50)); color:var(--success-600);
+  padding:.75rem 2rem; border-radius:50px; border:2px solid var(--success-200); font-size:1.25rem; font-weight:600; margin:1rem 0 2rem;
 }
-
-.subjects-container {
-  background: var(--gray-50);
-  border-radius: 16px;
-  padding: 2rem;
-  margin: 2rem 0;
-  border: 1px solid var(--gray-200);
-}
-
-.subjects-title {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--gray-800);
-  margin-bottom: 1.5rem;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.subjects-list {
-  list-style: none;
-  display: grid;
-  gap: 0.75rem;
-}
-
+.subjects-container { background:var(--gray-50); border-radius:16px; padding:2rem; margin:2rem 0; border:1px solid var(--gray-200); }
+.subjects-title { font-size:1.25rem; font-weight:600; color:var(--gray-800); margin-bottom:1.5rem; display:flex; align-items:center; gap:.75rem; }
+.subjects-list { list-style:none; display:grid; gap:.75rem; }
 .subjects-list li {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--white);
-  border-radius: 12px;
-  border: 1px solid var(--gray-200);
-  color: var(--gray-700);
-  transition: all 0.3s ease;
+  display:flex; align-items:center; gap:.75rem; padding:.75rem 1rem; background:#fff; border-radius:12px; border:1px solid var(--gray-200);
+  color:var(--gray-700); transition:all .3s ease;
+}
+.subjects-list li:hover { box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateX(4px); }
+.subjects-list li::before { content:'📚'; font-size:1.25rem; }
+
+/* ===== Actions ===== */
+.actions { display:flex; flex-wrap:wrap; gap:1rem; justify-content:center; margin-top:3rem; }
+
+/* ===== Progress/Anim/Responsive ===== */
+.progress-container { margin-bottom:2rem; }
+.progress-text { font-size:.9rem; color:var(--gray-600); margin-bottom:.5rem; text-align:center; }
+.progress-bar { width:100%; height:8px; background:var(--gray-200); border-radius:50px; overflow:hidden; }
+.progress-fill { height:100%; background:linear-gradient(90deg, var(--primary-500), var(--primary-400)); border-radius:50px; transition:width .5s ease; }
+
+@media (max-width:768px){
+  body{padding:.5rem} .container{margin:1rem auto} .card{padding:2rem 1.5rem; border-radius:16px}
+  h1{font-size:2rem} .lead{font-size:1.1rem} .question-text{font-size:1.2rem}
+  .answers{grid-template-columns:1fr; gap:1rem} .answer-label{padding:1rem 1.25rem}
+  .actions{flex-direction:column; align-items:center} .btn{width:100%; max-width:300px}
+  .meta{flex-direction:column; align-items:flex-start; gap:.5rem}
+}
+@media (max-width:480px){
+  .card{padding:1.5rem 1rem} h1{font-size:1.75rem}
+  .question-container{padding:1.5rem} .question-header{flex-direction:column; text-align:center; gap:1rem}
+  .question-icon{width:60px; height:60px; font-size:1.5rem}
 }
 
-.subjects-list li:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  transform: translateX(4px);
-}
+.loading{ display:inline-block; width:20px; height:20px; border:2px solid #fff; border-radius:50%; border-top-color:transparent; animation:spin 1s ease-in-out infinite; }
+@keyframes spin{ to{ transform:rotate(360deg) } }
 
-.subjects-list li::before {
-  content: '📚';
-  font-size: 1.25rem;
-}
-
-/* ===== Actions (Button Groups) ===== */
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  justify-content: center;
-  margin-top: 3rem;
-}
-
-/* ===== Progress Indicator ===== */
-.progress-container {
-  margin-bottom: 2rem;
-}
-
-.progress-text {
-  font-size: 0.9rem;
-  color: var(--gray-600);
-  margin-bottom: 0.5rem;
-  text-align: center;
-}
-
-.progress-bar {
-  width: 100%;
-  height: 8px;
-  background: var(--gray-200);
-  border-radius: 50px;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--primary-500), var(--primary-400));
-  border-radius: 50px;
-  transition: width 0.5s ease;
-}
-
-/* ===== Responsive Design ===== */
-@media (max-width: 768px) {
-  body { padding: 0.5rem; }
-  .container { margin: 1rem auto; }
-  .card { padding: 2rem 1.5rem; border-radius: 16px; }
-  h1 { font-size: 2rem; }
-  .lead { font-size: 1.1rem; }
-  .question-text { font-size: 1.2rem; }
-  .answers { grid-template-columns: 1fr; gap: 1rem; }
-  .answer-label { padding: 1rem 1.25rem; }
-  .actions { flex-direction: column; align-items: center; }
-  .btn { width: 100%; max-width: 300px; }
-  .meta { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
-}
-
-@media (max-width: 480px) {
-  .card { padding: 1.5rem 1rem; }
-  h1 { font-size: 1.75rem; }
-  .question-container { padding: 1.5rem; }
-  .question-header { flex-direction: column; text-align: center; gap: 1rem; }
-  .question-icon { width: 60px; height: 60px; font-size: 1.5rem; }
-}
-
-/* ===== Loading Animation ===== */
-.loading {
-  display: inline-block;
-  width: 20px;
-  height: 20px;
-  border: 2px solid var(--white);
-  border-radius: 50%;
-  border-top-color: transparent;
-  animation: spin 1s ease-in-out infinite;
-}
-
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ===== Fade In Animation ===== */
-.fade-in { animation: fadeIn 0.6s ease-out; }
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(20px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+.fade-in{ animation:fadeIn .6s ease-out; }
+@keyframes fadeIn{ from{opacity:0; transform:translateY(20px)} to{opacity:1; transform:translateY(0)} }
 </style>
 </head>
 <body>
@@ -910,104 +622,63 @@ h1 {
 
     <?php if ($SHOW_START): ?>
       <div class="result-container">
-        <div class="result-icon">
-          <i class="fas fa-graduation-cap"></i>
-        </div>
+        <div class="result-icon"><i class="fas fa-graduation-cap"></i></div>
         <h1>แบบทดสอบแนะนำรายวิชาชีพเลือก</h1>
         <p class="lead">ระบบจะถามคำถามแบบ "ใช่ / ไม่ใช่" เพื่อวิเคราะห์และแนะนำกลุ่มวิชาที่เหมาะสมกับคุณมากที่สุด</p>
-        
         <div class="meta">
-          <div class="badge">
-            <i class="fas fa-user"></i>
-            รหัสนักศึกษา: <?= h($STUDENT_ID) ?>
-          </div>
-          <div class="badge">
-            <i class="fas fa-clock"></i>
-            ประมาณ 5-10 นาที
-          </div>
+          <div class="badge"><i class="fas fa-user"></i>รหัสนักศึกษา: <?= h($STUDENT_ID) ?></div>
+          <div class="badge"><i class="fas fa-clock"></i>ประมาณ 5-10 นาที</div>
         </div>
-
         <div class="actions">
-          <a href="quiz.php?qid=1" class="btn btn-primary">
-            <i class="fas fa-play"></i>
-            เริ่มทำแบบทดสอบ
-          </a>
-          <a href="student_dashboard.php" class="btn btn-outline">
-            <i class="fas fa-home"></i>
-            กลับหน้าหลัก
-          </a>
+          <a href="quiz.php?qid=1" class="btn btn-primary"><i class="fas fa-play"></i>เริ่มทำแบบทดสอบ</a>
+          <a href="student_dashboard.php" class="btn btn-outline"><i class="fas fa-home"></i>กลับหน้าหลัก</a>
         </div>
       </div>
 
     <?php elseif ($SHOW_QUIZ): ?>
       <h1>แบบทดสอบแนะนำรายวิชาชีพเลือก</h1>
-      
       <div class="meta">
-        <div class="badge">
-          <i class="fas fa-user"></i>
-          <?= h($STUDENT_ID) ?>
-        </div>
-        <div class="badge">
-          <i class="fas fa-question-circle"></i>
-          ข้อที่ <?= (int)$question['question_id'] ?>
-        </div>
+        <div class="badge"><i class="fas fa-user"></i><?= h($STUDENT_ID) ?></div>
+        <div class="badge"><i class="fas fa-question-circle"></i>ข้อที่ <?= (int)$question['question_id'] ?></div>
       </div>
 
       <form method="POST" action="quiz.php">
         <input type="hidden" name="qid" value="<?= (int)$question['question_id'] ?>">
-        
         <div class="question-container">
           <div class="question-header">
-            <div class="question-icon">
-              <i class="fas fa-lightbulb"></i>
-            </div>
+            <div class="question-icon"><i class="fas fa-lightbulb"></i></div>
             <div class="question-text"><?= h($question['question_text']) ?></div>
           </div>
-
           <div class="answers">
             <div class="answer-option">
               <input type="radio" name="answer" value="1" id="answer_yes" required>
               <label for="answer_yes" class="answer-label">
                 <div class="radio-custom"></div>
-                <div class="answer-text">
-                  <i class="fas fa-check text-success"></i> ใช่
-                </div>
+                <div class="answer-text"><i class="fas fa-check"></i> ใช่</div>
               </label>
             </div>
-            
             <div class="answer-option">
               <input type="radio" name="answer" value="0" id="answer_no">
               <label for="answer_no" class="answer-label">
                 <div class="radio-custom"></div>
-                <div class="answer-text">
-                  <i class="fas fa-times text-danger"></i> ไม่ใช่
-                </div>
+                <div class="answer-text"><i class="fas fa-times"></i> ไม่ใช่</div>
               </label>
             </div>
           </div>
         </div>
-
         <div class="actions">
-          <button type="submit" class="btn btn-primary">
-            <i class="fas fa-arrow-right"></i>
-            ข้อต่อไป
-          </button>
+          <button type="submit" class="btn btn-primary"><i class="fas fa-arrow-right"></i>ข้อต่อไป</button>
           <a href="student_dashboard.php" class="btn btn-danger" onclick="return confirm('คุณแน่ใจหรือไม่ที่จะยกเลิกการทำแบบทดสอบ?')">
-            <i class="fas fa-times"></i>
-            ยกเลิก
+            <i class="fas fa-times"></i>ยกเลิก
           </a>
         </div>
       </form>
 
     <?php elseif ($SHOW_RESULT): ?>
       <div class="result-container">
-        <div class="result-icon">
-          <i class="fas fa-trophy"></i>
-        </div>
-        
+        <div class="result-icon"><i class="fas fa-trophy"></i></div>
         <h1 class="result-title">ผลลัพธ์ของคุณ</h1>
         <p class="lead">ระบบแนะนำกลุ่มวิชาที่เหมาะกับคุณ</p>
-        
         <div class="result-group">
           <i class="fas fa-star"></i>
           <?= $RESULT_GROUP_NAME ? h($RESULT_GROUP_NAME) : ('กลุ่มที่ '.(int)$RESULT_GROUP) ?>
@@ -1015,10 +686,7 @@ h1 {
 
         <?php if (!empty($RESULT_SUBJECTS)): ?>
           <div class="subjects-container">
-            <div class="subjects-title">
-              <i class="fas fa-book-open"></i>
-              รายวิชาที่แนะนำในกลุ่มนี้
-            </div>
+            <div class="subjects-title"><i class="fas fa-book-open"></i>รายวิชาที่แนะนำในกลุ่มนี้</div>
             <ul class="subjects-list">
               <?php foreach ($RESULT_SUBJECTS as $row): ?>
                 <li><?= h($row['subject_name']) ?></li>
@@ -1028,17 +696,10 @@ h1 {
         <?php endif; ?>
 
         <div class="actions">
-          <a href="quiz.php" class="btn btn-primary">
-            <i class="fas fa-redo"></i>
-            ทำแบบทดสอบใหม่
-          </a>
-          <a href="student_dashboard.php" class="btn btn-success">
-            <i class="fas fa-home"></i>
-            กลับหน้าแดชบอร์ด
-          </a>
+          <a href="quiz.php" class="btn btn-primary"><i class="fas fa-redo"></i>ทำแบบทดสอบใหม่</a>
+          <a href="student_dashboard.php" class="btn btn-success"><i class="fas fa-home"></i>กลับหน้าแดชบอร์ด</a>
         </div>
       </div>
-
     <?php endif; ?>
 
   </div>
@@ -1046,39 +707,39 @@ h1 {
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    const card = document.querySelector('.card');
-    if (card) card.classList.add('fade-in');
+  const card = document.querySelector('.card');
+  if (card) card.classList.add('fade-in');
 
-    const form = document.querySelector('form');
-    if (form) {
-        form.addEventListener('submit', function() {
-            const submitBtn = form.querySelector('button[type="submit"]');
-            if (submitBtn) {
-                submitBtn.innerHTML = '<span class="loading"></span> กำลังประมวลผล...';
-                submitBtn.disabled = true;
-            }
-        });
-    }
-
-    const answerLabels = document.querySelectorAll('.answer-label');
-    answerLabels.forEach(label => {
-        label.addEventListener('mouseenter', function() {
-            this.style.transform = 'translateY(-2px)';
-            this.style.boxShadow = '0 8px 25px rgba(37, 99, 235, 0.15)';
-        });
-        label.addEventListener('mouseleave', function() {
-            if (!this.previousElementSibling.checked) {
-                this.style.transform = 'translateY(0)';
-                this.style.boxShadow = 'none';
-            }
-        });
+  const form = document.querySelector('form');
+  if (form) {
+    form.addEventListener('submit', function() {
+      const submitBtn = form.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.innerHTML = '<span class="loading"></span> กำลังประมวลผล...';
+        submitBtn.disabled = true;
+      }
     });
+  }
+
+  const answerLabels = document.querySelectorAll('.answer-label');
+  answerLabels.forEach(label => {
+    label.addEventListener('mouseenter', function() {
+      this.style.transform = 'translateY(-2px)';
+      this.style.boxShadow = '0 8px 25px rgba(37, 99, 235, 0.15)';
+    });
+    label.addEventListener('mouseleave', function() {
+      if (!this.previousElementSibling.checked) {
+        this.style.transform = 'translateY(0)';
+        this.style.boxShadow = 'none';
+      }
+    });
+  });
 });
 
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && e.target.type === 'radio') {
-        e.target.closest('form').submit();
-    }
+  if (e.key === 'Enter' && e.target.type === 'radio') {
+    e.target.closest('form').submit();
+  }
 });
 </script>
 

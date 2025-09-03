@@ -1,15 +1,53 @@
 <?php
-// teacher.php — Dashboard อาจารย์ + เปลี่ยนรหัสผ่าน + ลิงก์รีเซ็ต
+// teacher.php — Dashboard อาจารย์ + เปลี่ยนรหัสผ่าน + โปรไฟล์อาจารย์ + กลุ่ม/นักศึกษา + quiz + education_info
 session_start();
+
+// ตรวจสอบการเข้าสู่ระบบและประเภทผู้ใช้
 if (empty($_SESSION['loggedin']) || (($_SESSION['user_type'] ?? '') !== 'teacher')) {
-    header('Location: index.php?error=unauthorized'); exit;
+    header('Location: index.php?error=unauthorized');
+    exit;
 }
+
 require_once 'db_connect.php'; // ต้องมี $conn (mysqli)
 
-function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
+/* =========================================================
+   Helper: ดึงผลลัพธ์จาก mysqli_stmt ให้ใช้ได้ทั้งกรณีมี/ไม่มี mysqlnd
+   ========================================================= */
+function get_stmt_rows(mysqli_stmt $stmt): array {
+    if (method_exists($stmt, 'get_result')) {
+        $res = $stmt->get_result();
+        if ($res instanceof mysqli_result) return $res->fetch_all(MYSQLI_ASSOC);
+        return [];
+    }
+    $meta = $stmt->result_metadata();
+    if (!$meta) return [];
+    $fields = [];
+    $row = [];
+    $bindArgs = [];
+    while ($f = $meta->fetch_field()) {
+        $fields[] = $f->name;
+        $row[$f->name] = null;
+        $bindArgs[] = &$row[$f->name];
+    }
+    call_user_func_array([$stmt, 'bind_result'], $bindArgs);
+    $out = [];
+    while ($stmt->fetch()) {
+        $copy = [];
+        foreach ($fields as $fn) $copy[$fn] = $row[$fn];
+        $out[] = $copy;
+    }
+    return $out;
+}
 
-// ===== CSRF =====
-if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+// ฟังก์ชันสำหรับป้องกัน XSS
+function h($s){
+    return htmlspecialchars((string)($s ?? ''), ENT_QUOTES, 'UTF-8');
+}
+
+// ===== CSRF Protection =====
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 
 // ===== หา teacher_id =====
 $teacherId = $_SESSION['teacher_id'] ?? null;
@@ -17,19 +55,31 @@ if (!$teacherId) {
     $username = $_SESSION['username'] ?? null;
     if ($username) {
         $stmt = $conn->prepare("SELECT teacher_id FROM teacher WHERE username = ? LIMIT 1");
-        $stmt->bind_param('s', $username);
-        $stmt->execute();
-        $stmt->bind_result($tid);
-        if ($stmt->fetch()) $teacherId = $tid;
-        $stmt->close();
+        if ($stmt) {
+            $stmt->bind_param('s', $username);
+            $stmt->execute();
+            $rows = get_stmt_rows($stmt);
+            if (!empty($rows)) {
+                $teacherId = $rows[0]['teacher_id'];
+                $_SESSION['teacher_id'] = $teacherId;
+            }
+            $stmt->close();
+        } else {
+            error_log("Failed to prepare statement for teacher_id lookup: " . $conn->error);
+            die('เกิดข้อผิดพลาดในการเตรียมคำสั่งฐานข้อมูล (TID)');
+        }
     }
 }
-if (!$teacherId) { die('ไม่พบรหัสอาจารย์ในเซสชัน กรุณาออกและเข้าสู่ระบบใหม่'); }
+if (!$teacherId) {
+    header('Location: index.php?error=teacher_id_missing');
+    exit;
+}
 
-// ===== helpers: ตาราง/คอลัมน์มีไหม =====
+// ===== Helpers for DB Schema checks =====
 function tableExists(mysqli $conn, string $name): bool {
     $sql = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?";
     $stmt = $conn->prepare($sql);
+    if (!$stmt) return false;
     $stmt->bind_param('s', $name);
     $stmt->execute();
     $stmt->store_result();
@@ -38,8 +88,10 @@ function tableExists(mysqli $conn, string $name): bool {
     return $ok;
 }
 function colExists(mysqli $conn, string $table, string $col): bool {
+    if (!tableExists($conn, $table)) return false;
     $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1";
     $stmt = $conn->prepare($sql);
+    if (!$stmt) return false;
     $stmt->bind_param('ss', $table, $col);
     $stmt->execute();
     $stmt->store_result();
@@ -47,12 +99,11 @@ function colExists(mysqli $conn, string $table, string $col): bool {
     $stmt->close();
     return $ok;
 }
-// นิพจน์ชื่อ-รหัส นศ. แบบยืดหยุ่น (คืน string SQL ที่อ้างนามแฝง s.*)
 function studentNameExpr(mysqli $conn): string {
     $parts = [];
     if (colExists($conn,'students','student_name')) $parts[] = "s.student_name";
-    if (colExists($conn,'students','full_name'))   $parts[] = "s.full_name";
-    if (colExists($conn,'students','name'))        $parts[] = "s.name";
+    if (colExists($conn,'students','full_name')) $parts[] = "s.full_name";
+    if (colExists($conn,'students','name')) $parts[] = "s.name";
     $hasF = colExists($conn,'students','first_name');
     $hasL = colExists($conn,'students','last_name');
     if ($hasF || $hasL) {
@@ -60,15 +111,45 @@ function studentNameExpr(mysqli $conn): string {
         $parts[] = "TRIM(CONCAT_WS(' ',".implode(',',$pp)."))";
     }
     if (!$parts) return "CAST(s.student_id AS CHAR)";
-    return "COALESCE(".implode(',',$parts).", CAST(s.student_id AS CHAR))";
+    return "COALESCE(".implode(', ',$parts).", CAST(s.student_id AS CHAR))";
 }
 function studentCodeExpr(mysqli $conn): string {
     if (colExists($conn,'students','student_code')) return "s.student_code";
-    if (colExists($conn,'students','code'))        return "s.code";
+    if (colExists($conn,'students','code')) return "s.code";
     return "CAST(s.student_id AS CHAR)";
 }
 
-// ====== จัดการเปลี่ยนรหัสผ่าน ======
+// ====== โปรไฟล์อาจารย์ ======
+$teacherProfile = ['name'=>null,'username'=>null,'email'=>null,'phone'=>null];
+if (tableExists($conn,'teacher')) {
+    $nameCols = [];
+    if (colExists($conn,'teacher','full_name')) $nameCols[]='full_name';
+    if (colExists($conn,'teacher','teacher_name')) $nameCols[]='teacher_name';
+    if (colExists($conn,'teacher','name')) $nameCols[]='name';
+    $nameExpr = $nameCols ? ("COALESCE(".implode(', ',$nameCols).")") : "CAST(teacher_id AS CHAR)";
+    $fields = "teacher_id, {$nameExpr} AS tname";
+    if (colExists($conn,'teacher','username')) $fields.=", username";
+    if (colExists($conn,'teacher','email')) $fields.=", email";
+    if (colExists($conn,'teacher','phone')) $fields.=", phone";
+    $st = $conn->prepare("SELECT {$fields} FROM teacher WHERE teacher_id=? LIMIT 1");
+    if ($st) {
+        $st->bind_param('s',$teacherId);
+        $st->execute();
+        $rows = get_stmt_rows($st);
+        if (!empty($rows)){
+            $row = $rows[0];
+            $teacherProfile['name']=$row['tname']??$teacherId;
+            $teacherProfile['username']=$row['username']??($_SESSION['username']??null);
+            $teacherProfile['email']=$row['email']??null;
+            $teacherProfile['phone']=$row['phone']??null;
+        }
+        $st->close();
+    } else {
+        error_log("Failed to prepare statement for teacher profile: " . $conn->error);
+    }
+}
+
+// ====== เปลี่ยนรหัสผ่าน ======
 $pw_error = '';
 $pw_success = '';
 if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '') === 'change_password') {
@@ -76,9 +157,8 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '') === 'change_
         $pw_error = 'CSRF ไม่ถูกต้อง กรุณาลองใหม่';
     } else {
         $current = trim((string)($_POST['current_password'] ?? ''));
-        $new     = trim((string)($_POST['new_password'] ?? ''));
+        $new = trim((string)($_POST['new_password'] ?? ''));
         $confirm = trim((string)($_POST['confirm_password'] ?? ''));
-
         if ($current === '' || $new === '' || $confirm === '') {
             $pw_error = 'กรุณากรอกข้อมูลให้ครบทุกช่อง';
         } elseif ($new !== $confirm) {
@@ -89,230 +169,544 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action'] ?? '') === 'change_
             $tid = (int)$teacherId;
             $stmt = $conn->prepare("
                 SELECT 
-                    COALESCE(password_hash,'')    AS password_hash,
-                    COALESCE(teacher_password,'') AS teacher_password,
-                    COALESCE(password,'')         AS legacy_plain
-                FROM teacher
-                WHERE teacher_id = ?
-                LIMIT 1
+                    COALESCE(password_hash,'') AS password_hash, 
+                    COALESCE(teacher_password,'') AS teacher_password, 
+                    COALESCE(password,'') AS legacy_plain 
+                FROM teacher 
+                WHERE teacher_id = ? LIMIT 1
             ");
-            $stmt->bind_param('i', $tid);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            $row = $res ? $res->fetch_assoc() : null;
-            $stmt->close();
+            if ($stmt) {
+                $stmt->bind_param('i', $tid);
+                $stmt->execute();
+                $rows = get_stmt_rows($stmt);
+                $row = $rows ? $rows[0] : null;
+                $stmt->close();
 
-            if (!$row) {
-                $pw_error = 'ไม่พบข้อมูลอาจารย์';
-            } else {
-                $match = false;
-                if (!$match && $row['password_hash'] !== '' && password_get_info($row['password_hash'])['algo']) {
-                    $match = password_verify($current, $row['password_hash']);
-                }
-                if (!$match && $row['teacher_password'] !== '' && password_get_info($row['teacher_password'])['algo']) {
-                    $match = password_verify($current, $row['teacher_password']);
-                }
-                if (!$match && $row['legacy_plain'] !== '') {
-                    if ($current === $row['legacy_plain'] || hash('sha256', $current) === $row['legacy_plain']) {
-                        $match = true;
+                if (!$row) {
+                    $pw_error = 'ไม่พบข้อมูลอาจารย์';
+                } else {
+                    $match = false;
+                    if (!$match && $row['password_hash'] !== '' && password_get_info($row['password_hash'])['algo']) {
+                        $match = password_verify($current, $row['password_hash']);
+                    }
+                    if (!$match && $row['teacher_password'] !== '' && password_get_info($row['teacher_password'])['algo']) {
+                        $match = password_verify($current, $row['teacher_password']);
+                    }
+                    if (!$match && $row['legacy_plain'] !== '') {
+                        if ($current === $row['legacy_plain'] || hash('sha256', $current) === $row['legacy_plain']) {
+                            $match = true;
+                        }
+                    }
+
+                    if (!$match) {
+                        $pw_error = 'รหัสผ่านปัจจุบันไม่ถูกต้อง';
+                    } else {
+                        $newHash = password_hash($new, PASSWORD_DEFAULT);
+                        $up = $conn->prepare("UPDATE teacher SET password_hash = ?, password = NULL, teacher_password = NULL WHERE teacher_id = ?");
+                        if ($up) {
+                            $up->bind_param('si', $newHash, $tid);
+                            if ($up->execute()) {
+                                $pw_success = 'เปลี่ยนรหัสผ่านเรียบร้อย';
+                            } else {
+                                $pw_error = 'ไม่สามารถอัปเดตรหัสผ่านได้: '.$up->error;
+                                error_log("Password update failed: " . $up->error);
+                            }
+                            $up->close();
+                        } else {
+                            $pw_error = 'ไม่สามารถเตรียมคำสั่งอัปเดตรหัสผ่านได้: '.$conn->error;
+                            error_log("Failed to prepare password update statement: " . $conn->error);
+                        }
                     }
                 }
-
-                if (!$match) {
-                    $pw_error = 'รหัสผ่านปัจจุบันไม่ถูกต้อง';
-                } else {
-                    $newHash = password_hash($new, PASSWORD_DEFAULT);
-                    $up = $conn->prepare("
-                        UPDATE teacher
-                        SET password_hash = ?, password = NULL, teacher_password = NULL
-                        WHERE teacher_id = ?
-                    ");
-                    $up->bind_param('si', $newHash, $tid);
-                    if ($up->execute()) $pw_success = 'เปลี่ยนรหัสผ่านเรียบร้อย';
-                    else $pw_error = 'ไม่สามารถอัปเดตรหัสผ่านได้: '.$conn->error;
-                    $up->close();
-                }
+            } else {
+                $pw_error = 'ไม่สามารถเตรียมคำสั่งค้นหารหัสผ่านได้: '.$conn->error;
+                error_log("Failed to prepare password lookup statement: " . $conn->error);
             }
         }
     }
 }
 
-// ====== เตรียมข้อมูลกลุ่ม ======
-$memberTables = ['course_group_students', 'group_members', 'enrollments'];
-$memberTable = null;
-foreach ($memberTables as $t) { if (tableExists($conn, $t)) { $memberTable = $t; break; } }
+// ====== กลุ่ม/นักศึกษา/quiz Data Fetching ======
+$hasStudentsTable = tableExists($conn, 'students');
+$hasPersonalInfo = tableExists($conn, 'personal_info');
+$hasEducationInfo = tableExists($conn, 'education_info');
+$hasUserLogin = tableExists($conn, 'user_login');
 
-$hasStudentsTable  = tableExists($conn, 'students');
-$hasPersonalInfo   = tableExists($conn, 'personal_info');
-$hasEducationInfo  = tableExists($conn, 'education_info');
-
-// รายการกลุ่มของอาจารย์ (เพิ่ม curriculum_value เพื่อ fallback education_info)
 $groups = [];
-$sql = "SELECT g.group_id, g.group_name, g.course_id,
-               ".(colExists($conn,'course_groups','curriculum_value')?'g.curriculum_value':'NULL')." AS curriculum_value,
-               COALESCE(c.course_name, CONCAT('Course#', g.course_id)) AS course_name
-        FROM course_groups g
-        LEFT JOIN courses c ON c.course_id = g.course_id
-        WHERE g.teacher_id = ?
+$groupSelectFields = "g.group_id, g.group_name, g.course_id";
+$groupSelectFields .= colExists($conn,'course_groups','curriculum_value') ? ", g.curriculum_value" : ", NULL AS curriculum_value";
+
+$sql = "SELECT {$groupSelectFields}, COALESCE(c.course_name, CONCAT('Course#', g.course_id)) AS course_name 
+        FROM course_groups g 
+        LEFT JOIN courses c ON c.course_id = g.course_id 
+        WHERE g.teacher_id = ? 
         ORDER BY ".(colExists($conn,'course_groups','created_at')?'g.created_at DESC':'g.group_id DESC');
+
 if ($stmt = $conn->prepare($sql)) {
     $stmt->bind_param('s', $teacherId);
     $stmt->execute();
-    $res = $stmt->get_result();
-    while ($row = $res->fetch_assoc()) $groups[] = $row;
+    $rows = get_stmt_rows($stmt);
+    foreach ($rows as $row) $groups[] = $row;
     $stmt->close();
+} else {
+    error_log("Failed to prepare statement for group fetching: " . $conn->error);
 }
 
-$selectedGroupId = isset($_GET['group_id']) ? trim($_GET['group_id']) : null;
+$selectedGroupId = isset($_GET['group_id']) ? trim((string)$_GET['group_id']) : null;
 $students = [];
 $quizStats = [];
-$sourceNote = ''; // ใช้บอกว่าใช้แหล่งสมาชิกจากไหน
+$studentEdu = [];
+$sourceNote = '';
+$groupInfo = null;
 
 if ($selectedGroupId) {
-    // ---- ดึงข้อมูลกลุ่มที่เลือก (เพื่อรู้ group_name, curriculum_value, course_id) ----
-    $grpInfo = null;
-    $gsql = "SELECT group_id, group_name, course_id,
-                    ".(colExists($conn,'course_groups','curriculum_value')?'curriculum_value':'NULL')." AS curriculum_value
-             FROM course_groups WHERE group_id = ? LIMIT 1";
+    // ---- ข้อมูลกลุ่ม
+    $groupInfoSelectFields = "group_id, group_name, course_id";
+    $groupInfoSelectFields .= colExists($conn,'course_groups','curriculum_value') ? ", curriculum_value" : ", NULL AS curriculum_value";
+    $gsql = "SELECT {$groupInfoSelectFields} FROM course_groups WHERE group_id = ? LIMIT 1";
     if ($stmt = $conn->prepare($gsql)) {
         $stmt->bind_param('s', $selectedGroupId);
         $stmt->execute();
-        $res = $stmt->get_result();
-        $grpInfo = $res ? $res->fetch_assoc() : null;
+        $rows = get_stmt_rows($stmt);
+        $groupInfo = $rows ? $rows[0] : null;
         $stmt->close();
+    } else {
+        error_log("Failed to prepare statement for selected group info: " . $conn->error);
     }
 
-    // ---- วิธีที่ 1: ใช้ตารางสมาชิกหากมี ----
-    $studentIds = [];
-    if ($memberTable) {
-        $memberQuery = "SELECT m.student_id FROM {$memberTable} m WHERE m.group_id = ?";
-        if ($stmt = $conn->prepare($memberQuery)) {
-            $stmt->bind_param('s', $selectedGroupId);
-            $stmt->execute();
-            $memberRes = $stmt->get_result();
-            while ($r = $memberRes->fetch_assoc()) {
-                if (!empty($r['student_id'])) $studentIds[] = $r['student_id'];
-            }
-            $stmt->close();
-        }
-        if ($studentIds) $sourceNote = "ใช้ตารางสมาชิก: {$memberTable}";
-    }
+    // ---- student keys (ใช้ education_info.student_group เป็นตัวหลัก)
+    $studentKeys = [];
+    $foundMemberTable = false;
 
-    // ---- วิธีที่ 2 (fallback): education_info ← ผูกด้วย curriculum/group_name ----
-    if (!$studentIds && $hasEducationInfo && $grpInfo) {
-        // ต้องมี curriculum_value และ group_name
-        $curVal = (string)($grpInfo['curriculum_value'] ?? '');
-        $grpName= (string)($grpInfo['group_name'] ?? '');
-        if ($curVal !== '' && $grpName !== '') {
-            $esql = "SELECT DISTINCT ei.student_id
-                     FROM education_info ei
-                     WHERE ei.curriculum_name = ? AND ei.student_group = ?";
-            if ($stmt = $conn->prepare($esql)) {
-                $stmt->bind_param('ss', $curVal, $grpName);
-                $stmt->execute();
-                $res = $stmt->get_result();
-                while ($r = $res->fetch_assoc()) {
-                    if (!empty($r['student_id'])) $studentIds[] = $r['student_id'];
+    if ($hasEducationInfo && $groupInfo && colExists($conn,'education_info','student_group')) {
+        $grpName = (string)($groupInfo['group_name'] ?? '');
+        $curVal  = (string)($groupInfo['curriculum_value'] ?? '');
+
+        if ($grpName !== '') {
+            if (colExists($conn,'education_info','curriculum_name') && $curVal !== '') {
+                $esql = "SELECT DISTINCT ei.student_id
+                         FROM education_info ei
+                         WHERE ei.student_group = ? AND ei.curriculum_name = ?";
+                if ($st = $conn->prepare($esql)) {
+                    $st->bind_param('ss', $grpName, $curVal);
+                    $st->execute();
+                    $rs = $st->get_result();
+                    while ($r = $rs->fetch_assoc()) {
+                        $sid = trim((string)$r['student_id']);
+                        if ($sid !== '') $studentKeys[] = $sid;
+                    }
+                    $st->close();
                 }
-                $stmt->close();
-                if ($studentIds) $sourceNote = "ใช้ education_info (curriculum_name/student_group)";
+            }
+
+            if (empty($studentKeys)) {
+                $esql2 = "SELECT DISTINCT ei.student_id
+                          FROM education_info ei
+                          WHERE ei.student_group = ?";
+                if ($st = $conn->prepare($esql2)) {
+                    $st->bind_param('s', $grpName);
+                    $st->execute();
+                    $rs = $st->get_result();
+                    while ($r = $rs->fetch_assoc()) {
+                        $sid = trim((string)$r['student_id']);
+                        if ($sid !== '') $studentKeys[] = $sid;
+                    }
+                    $st->close();
+                }
+            }
+        }
+
+        if (!empty($studentKeys)) {
+            $foundMemberTable = true;
+            $sourceNote = "ใช้ education_info โดย student_group".($curVal!==''?" + curriculum_name":"");
+        }
+    }
+
+    // fallback หาในตารางสมาชิกอื่น ๆ
+    if (!$foundMemberTable) {
+        $memberTables = ['course_group_students','group_members','enrollments','student_group_members','registrations'];
+        foreach ($memberTables as $mt) {
+            if (!tableExists($conn, $mt)) continue;
+
+            $candStudentCols = ['student_id', 'student_code', 'std_id', 'std_code', 'sid'];
+            $studentColUsed = null;
+            foreach ($candStudentCols as $sCol) {
+                if (colExists($conn, $mt, $sCol)) { $studentColUsed = $sCol; break; }
+            }
+            if (!$studentColUsed) continue;
+
+            $candGroupCols = ['group_id','course_group_id','section_id','group_code','cg_id','groupid'];
+            $groupColsUsed = [];
+            foreach ($candGroupCols as $gc) if (colExists($conn, $mt, $gc)) $groupColsUsed[] = $gc;
+
+            if (!empty($groupColsUsed)) {
+                $conds=[]; $params=[]; $types='';
+                foreach ($groupColsUsed as $gc) { $conds[]="{$gc} = ?"; $params[]=$selectedGroupId; $types.='s'; }
+                $sqlM = "SELECT DISTINCT {$studentColUsed} AS s FROM {$mt} WHERE ".implode(' OR ', $conds);
+                if ($st = $conn->prepare($sqlM)) {
+                    $st->bind_param($types, ...$params);
+                    $st->execute();
+                    $rs = $st->get_result();
+                    while ($r = $rs->fetch_assoc()) {
+                        $vv = trim((string)$r['s']);
+                        if ($vv!=='') $studentKeys[]=$vv;
+                    }
+                    $st->close();
+                    if (!empty($studentKeys)) {
+                        $foundMemberTable = true;
+                        $sourceNote = "ใช้ตารางสมาชิก: {$mt} (คอลัมน์: {$studentColUsed}, เงื่อนไข: ".implode('/', $groupColsUsed).")";
+                        break;
+                    }
+                } else {
+                    error_log("Failed to prepare statement for member table {$mt}: " . $conn->error);
+                }
+            } elseif ($groupInfo && !empty($groupInfo['course_id']) && colExists($conn, $mt, 'course_id')) {
+                $sqlM = "SELECT DISTINCT {$studentColUsed} AS s FROM {$mt} WHERE course_id = ?";
+                if ($st = $conn->prepare($sqlM)) {
+                    $cid = (string)$groupInfo['course_id'];
+                    $st->bind_param('s', $cid);
+                    $st->execute();
+                    $rs = $st->get_result();
+                    while ($r = $rs->fetch_assoc()) {
+                        $vv = trim((string)$r['s']);
+                        if ($vv!=='') $studentKeys[]=$vv;
+                    }
+                    $st->close();
+                    if (!empty($studentKeys)) {
+                        $foundMemberTable = true;
+                        $sourceNote = "ใช้ตารางสมาชิก: {$mt} (ตาม course_id)";
+                        break;
+                    }
+                } else {
+                    error_log("Failed to prepare statement for member table {$mt} by course_id: " . $conn->error);
+                }
             }
         }
     }
 
-    // ---- ดึงข้อมูลนักศึกษาจาก studentIds ที่ได้ ----
-    if ($studentIds) {
-        $placeholders = implode(',', array_fill(0, count($studentIds), '?'));
-        $types = str_repeat('s', count($studentIds));
+    $studentKeys = array_values(array_unique($studentKeys));
 
+    // ---- Fallback education_info (curriculum_name + group)
+    if (!$foundMemberTable && empty($studentKeys) && $hasEducationInfo && $groupInfo) {
+        $curVal = (string)($groupInfo['curriculum_value'] ?? '');
+        $grpName = (string)($groupInfo['group_name'] ?? '');
+        if ($curVal !== '' && $grpName !== '' && colExists($conn,'education_info','curriculum_name') && colExists($conn,'education_info','student_group')) {
+            $esql = "SELECT DISTINCT ei.student_id FROM education_info ei WHERE ei.curriculum_name=? AND ei.student_group=?";
+            if ($st = $conn->prepare($esql)) {
+                $st->bind_param('ss', $curVal, $grpName);
+                $st->execute();
+                $rows = get_stmt_rows($st);
+                foreach ($rows as $r) { $sid=trim((string)$r['student_id']); if ($sid!=='') $studentKeys[]=$sid; }
+                $st->close();
+                if (!empty($studentKeys)) $sourceNote = "ใช้ education_info (curriculum_name/student_group)";
+            } else {
+                error_log("Failed to prepare statement for education_info fallback: " . $conn->error);
+            }
+        }
+    }
+
+    // ---- โหลดข้อมูลนักศึกษา (ชื่อ/เมลจาก personal_info ผ่าน education_info)
+    if (!empty($studentKeys)) {
+        $placeholders = implode(',', array_fill(0, count($studentKeys), '?'));
+        $bindTypes = str_repeat('s', count($studentKeys));
+        $foundStudentData = false;
+
+        // ใช้ students ถ้ามี (เผื่อบางรายมีชื่ออยู่)
         if ($hasStudentsTable) {
             $nameExpr = studentNameExpr($conn);
             $codeExpr = studentCodeExpr($conn);
-            // สร้าง SQL พร้อมชื่อแบบยืดหยุ่น
-            $sqlStd = "SELECT s.student_id, {$nameExpr} AS student_name, {$codeExpr} AS student_code,
-                              ".(colExists($conn,'students','email')?'COALESCE(s.email, \'\')':'\'\'')." AS email
-                       FROM students s
-                       WHERE s.student_id IN ($placeholders)
-                       ORDER BY student_name";
-            $stmt = $conn->prepare($sqlStd);
-            $stmt->bind_param($types, ...$studentIds);
-        } else {
-            // ไม่มี students → สำรองไป user_login + personal_info ถ้ามี
-            if ($hasPersonalInfo) {
-                $sqlStd = "SELECT u.student_id,
-                                  COALESCE(p.full_name, u.student_id) AS student_name,
-                                  COALESCE(p.email,'') AS email
-                           FROM user_login u
-                           LEFT JOIN personal_info p ON p.id = u.personal_id
-                           WHERE u.student_id IN ($placeholders)
-                           ORDER BY student_name";
-            } else {
-                $sqlStd = "SELECT u.student_id,
-                                  u.student_id AS student_name,
-                                  '' AS email
-                           FROM user_login u
-                           WHERE u.student_id IN ($placeholders)
-                           ORDER BY u.student_id";
+            $hasStudentCodeCol = colExists($conn, 'students', 'student_code') || colExists($conn, 'students', 'code');
+            $emailCol = colExists($conn, 'students', 'email') ? 'COALESCE(s.email, \'\')' : '\'\''; 
+
+            $sqlStd = "SELECT DISTINCT s.student_id, {$nameExpr} AS student_name, {$codeExpr} AS student_code, {$emailCol} AS email 
+                       FROM students s 
+                       WHERE s.student_id IN ({$placeholders})";
+            $params = $studentKeys; $typesToBind = $bindTypes;
+            if ($hasStudentCodeCol) {
+                $sqlStd .= " OR {$codeExpr} IN ({$placeholders})";
+                $params = array_merge($studentKeys, $studentKeys);
+                $typesToBind .= $bindTypes;
             }
-            $stmt = $conn->prepare($sqlStd);
-            $stmt->bind_param($types, ...$studentIds);
+            $sqlStd .= " ORDER BY student_name";
+
+            if ($st = $conn->prepare($sqlStd)) {
+                $st->bind_param($typesToBind, ...$params);
+                $st->execute();
+                $rows = get_stmt_rows($st);
+                foreach ($rows as $row) $students[] = $row;
+                $st->close();
+                if (!empty($students)) $foundStudentData = true;
+            } else {
+                error_log("Failed to prepare statement for students table: " . $conn->error);
+            }
         }
-        $stmt->execute();
-        $resStd = $stmt->get_result();
-        while ($row = $resStd->fetch_assoc()) $students[] = $row;
-        $stmt->close();
+
+        // ถ้า students ไม่พอ เอาจาก education_info + personal_info ให้ครบแน่
+        if (!$foundStudentData && $hasEducationInfo) {
+            $ph = implode(',', array_fill(0, count($studentKeys), '?'));
+            $types = str_repeat('s', count($studentKeys));
+            $sqlStd = "
+                SELECT ei.student_id,
+                       COALESCE(pi.full_name, ei.student_id) AS student_name,
+                       COALESCE(pi.email, '') AS email,
+                       COALESCE(ei.student_group, '') AS student_group,
+                       COALESCE(ei.curriculum_name, '') AS curriculum_name
+                FROM education_info ei
+                LEFT JOIN personal_info pi ON pi.id = ei.personal_id
+                WHERE ei.student_id IN ($ph)
+                ORDER BY student_name
+            ";
+            if ($st = $conn->prepare($sqlStd)) {
+                $st->bind_param($types, ...$studentKeys);
+                $st->execute();
+                $rows = get_stmt_rows($st);
+                foreach ($rows as $r) {
+                    $students[] = [
+                        'student_id'   => $r['student_id'],
+                        'student_name' => $r['student_name'],
+                        'student_code' => $r['student_id'],
+                        'email'        => $r['email']
+                    ];
+                    $studentEdu[$r['student_id']] = [
+                        'student_group'   => $r['student_group'],
+                        'curriculum_name' => $r['curriculum_name']
+                    ];
+                }
+                $st->close();
+            }
+        }
     }
 
-    // ---- คะแนนแบบทดสอบล่าสุดต่อ quiz ต่อคน (ถ้ามีตาราง) ----
-    $hasQuizzes  = tableExists($conn, 'quizzes');
-    $hasAttempts = tableExists($conn, 'quiz_attempts');
+    // ---- เติม group/curriculum จาก education_info ให้แถวที่มาจาก students
+    if (!empty($students) && $hasEducationInfo) {
+        $sids = array_column($students, 'student_id');
+        if (!empty($sids)) {
+            $placeholders = implode(',', array_fill(0, count($sids), '?'));
+            $bindTypes = str_repeat('s', count($sids));
+            $curr = $groupInfo['curriculum_value'] ?? null;
+            $didByCurr = false;
 
-    if ($students && $hasQuizzes && $hasAttempts && !empty($grpInfo['course_id'])) {
-        $courseId = $grpInfo['course_id'];
-        $quizMap = [];
-        $stmt = $conn->prepare("SELECT quiz_id, title FROM quizzes WHERE course_id = ?");
-        $stmt->bind_param('s', $courseId);
-        $stmt->execute();
-        $resQ = $stmt->get_result();
-        while ($q = $resQ->fetch_assoc()) $quizMap[$q['quiz_id']] = $q['title'];
-        $stmt->close();
-
-        if ($quizMap) {
-            $place = implode(',', array_fill(0, count($students), '?'));
-            $types = str_repeat('s', count($students));
-            $studentIdsForA = array_column($students, 'student_id');
-
-            // quiz_id ใส่ตรง ๆ หลัง intval (ภายในระบบ)
-            $quizIdsStr = implode(',', array_map('intval', array_keys($quizMap)));
-
-            $sqlA = "
-                SELECT a.student_id, a.quiz_id, a.score, a.status, a.submitted_at
-                FROM quiz_attempts a
-                INNER JOIN (
-                    SELECT student_id, quiz_id, MAX(submitted_at) AS last_time
-                    FROM quiz_attempts
-                    WHERE student_id IN ($place) AND quiz_id IN ($quizIdsStr)
-                    GROUP BY student_id, quiz_id
-                ) t
-                ON a.student_id = t.student_id AND a.quiz_id = t.quiz_id AND a.submitted_at = t.last_time
-                ORDER BY a.student_id, a.quiz_id
-            ";
-            $stmt = $conn->prepare($sqlA);
-            $stmt->bind_param($types, ...$studentIdsForA);
-            $stmt->execute();
-            $resA = $stmt->get_result();
-            while ($a = $resA->fetch_assoc()) {
-                $sid = $a['student_id'];
-                if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
-                $quizStats[$sid][] = [
-                    'quiz_id'    => $a['quiz_id'],
-                    'quiz_title' => $quizMap[$a['quiz_id']] ?? ('Quiz#'.$a['quiz_id']),
-                    'score'      => $a['score'],
-                    'status'     => $a['status'],
-                    'time'       => $a['submitted_at'],
-                ];
+            if (!empty($curr) && colExists($conn, 'education_info', 'curriculum_name')) {
+                $sql = "SELECT ei.student_id,ei.student_group,ei.curriculum_name 
+                        FROM education_info ei 
+                        WHERE ei.curriculum_name=? AND ei.student_id IN ({$placeholders})";
+                if ($st = $conn->prepare($sql)) {
+                    $combinedParams = array_merge([$curr], $sids);
+                    $bindTypesWithCurr = 's' . $bindTypes;
+                    $st->bind_param($bindTypesWithCurr, ...$combinedParams);
+                    $st->execute();
+                    $rows = get_stmt_rows($st);
+                    foreach ($rows as $r) {
+                        $sid = (string)$r['student_id'];
+                        $studentEdu[$sid] = [
+                            'student_group' => $r['student_group'] ?? '',
+                            'curriculum_name' => $r['curriculum_name'] ?? '',
+                        ];
+                    }
+                    $st->close();
+                    $didByCurr = !empty($studentEdu);
+                } else {
+                    error_log("Failed to prepare statement for education_info by curriculum: " . $conn->error);
+                }
             }
-            $stmt->close();
+
+            if (!$didByCurr) {
+                $latestCol = colExists($conn,'education_info','updated_at') ? 'updated_at' :
+                             (colExists($conn,'education_info','id') ? 'id' : null);
+                if ($latestCol) {
+                    $sql = "SELECT ei.student_id,ei.student_group,ei.curriculum_name 
+                            FROM education_info ei 
+                            INNER JOIN ( 
+                                SELECT student_id,MAX({$latestCol}) AS max_val 
+                                FROM education_info 
+                                WHERE student_id IN ({$placeholders}) 
+                                GROUP BY student_id 
+                            ) t ON t.student_id=ei.student_id AND t.max_val=ei.{$latestCol}";
+                    if ($st = $conn->prepare($sql)) {
+                        $st->bind_param($bindTypes, ...$sids);
+                        $st->execute();
+                        $rows = get_stmt_rows($st);
+                        foreach ($rows as $r) {
+                            $sid = (string)$r['student_id'];
+                            $studentEdu[$sid] = [
+                                'student_group' => $r['student_group'] ?? '',
+                                'curriculum_name' => $r['curriculum_name'] ?? '',
+                            ];
+                        }
+                        $st->close();
+                    } else {
+                        error_log("Failed to prepare statement for education_info fallback by latest record: " . $conn->error);
+                    }
+                }
+            }
+        }
+    }
+
+    /* ===== คะแนน quiz ล่าสุด (ทนสคีมา, ไม่พึ่งพา course_id ถ้าเป็น NULL, เดินสองทาง attempts/results) ===== */
+    $hasQuizzes   = tableExists($conn, 'quizzes');
+    $hasAttempts  = tableExists($conn, 'quiz_attempts');
+    $hasQResults  = tableExists($conn, 'quiz_results');
+
+    $debug_found_attempts = 0;
+    $debug_found_results  = 0;
+
+    if (!empty($students)) {
+        $studentIdList = array_column($students, 'student_id');
+        $ph    = implode(',', array_fill(0, count($studentIdList), '?'));
+        $types = str_repeat('s', count($studentIdList));
+        $courseId = $groupInfo['course_id'] ?? null;
+
+        // === 1) quiz_attempts (ถ้ามี)
+        if ($hasAttempts) {
+            $attemptTimeCol = null;
+            foreach (['submitted_at','created_at','updated_at','finish_time','end_time'] as $cand) {
+                if (colExists($conn,'quiz_attempts',$cand)) { $attemptTimeCol = $cand; break; }
+            }
+            if ($attemptTimeCol === null) {
+                $attemptTimeCol = colExists($conn,'quiz_attempts','id') ? 'id' : null;
+            }
+
+            $quizTitleMap = [];
+            if ($hasQuizzes) {
+                $qsql = "SELECT quiz_id, COALESCE(title, CONCAT('Quiz#',quiz_id)) AS title FROM quizzes";
+                $needCourseFilterInQuizzes = colExists($conn,'quizzes','course_id') && !empty($courseId);
+                if ($needCourseFilterInQuizzes) $qsql .= " WHERE course_id = ?";
+                $st = $conn->prepare($qsql);
+                if ($st) {
+                    if ($needCourseFilterInQuizzes) $st->bind_param('s', $courseId);
+                    $st->execute();
+                    $rr = get_stmt_rows($st);
+                    foreach ($rr as $r) $quizTitleMap[$r['quiz_id']] = $r['title'];
+                    $st->close();
+                }
+            }
+
+            if ($attemptTimeCol !== null) {
+                $attemptHasCourse = colExists($conn,'quiz_attempts','course_id');
+                $innerWhere = "student_id IN ($ph)";
+                $outerWhere = "a.student_id IN ($ph)";
+                $bindTypesAttempts = $types;
+                $bindParamsInner   = $studentIdList;
+                $bindParamsOuter   = $studentIdList;
+
+                if ($attemptHasCourse && !empty($courseId)) {
+                    $innerWhere .= " AND course_id = ?";
+                    $outerWhere .= " AND a.course_id = ?";
+                    $bindTypesAttempts .= 's';
+                    $bindParamsInner[] = $courseId;
+                    $bindParamsOuter[] = $courseId;
+                }
+
+                $sqlA = "
+                    SELECT a.student_id, a.quiz_id, a.score,
+                           ".(colExists($conn,'quiz_attempts','status') ? "a.status" : "NULL AS status").",
+                           a.`{$attemptTimeCol}` AS tstamp
+                    FROM quiz_attempts a
+                    INNER JOIN (
+                        SELECT student_id, quiz_id, MAX(`{$attemptTimeCol}`) AS last_time
+                        FROM quiz_attempts
+                        WHERE {$innerWhere}
+                        GROUP BY student_id, quiz_id
+                    ) t
+                    ON a.student_id = t.student_id
+                       AND a.quiz_id = t.quiz_id
+                       AND a.`{$attemptTimeCol}` = t.last_time
+                    WHERE {$outerWhere}
+                    ORDER BY a.student_id, a.quiz_id
+                ";
+
+                if ($st = $conn->prepare($sqlA)) {
+                    $allTypes = $bindTypesAttempts . $bindTypesAttempts;
+                    $allParams = array_merge($bindParamsInner, $bindParamsOuter);
+                    $st->bind_param($allTypes, ...$allParams);
+                    $st->execute();
+                    $rowsA = get_stmt_rows($st);
+                    $debug_found_attempts = count($rowsA);
+                    foreach ($rowsA as $a) {
+                        $sid = $a['student_id'];
+                        if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
+                        $title = $quizTitleMap[$a['quiz_id']] ?? ('Quiz#'.$a['quiz_id']);
+                        $quizStats[$sid][] = [
+                            'quiz_id'    => $a['quiz_id'],
+                            'quiz_title' => $title,
+                            'score'      => $a['score'],
+                            'status'     => $a['status'],
+                            'time'       => $a['tstamp'],
+                        ];
+                    }
+                    $st->close();
+                } else {
+                    error_log("Failed to prepare attempts query: ".$conn->error);
+                }
+            }
+        }
+
+        // === 2) quiz_results (fallback/เสริม) — ไม่กรองด้วย course_id และ cast student_id เป็น CHAR กันชนิดไม่ตรง
+        if ($hasQResults) {
+            $resTimeCol = null;
+            foreach (['submitted_at','created_at','updated_at','finish_time','end_time'] as $cand) {
+                if (colExists($conn,'quiz_results',$cand)) { $resTimeCol = $cand; break; }
+            }
+            if ($resTimeCol === null) {
+                $resTimeCol = colExists($conn,'quiz_results','id') ? 'id' : null;
+            }
+
+            if ($hasQuizzes && empty($quizTitleMap)) {
+                $quizTitleMap = [];
+                $qsql = "SELECT quiz_id, COALESCE(title, CONCAT('Quiz#',quiz_id)) AS title FROM quizzes";
+                if ($st = $conn->prepare($qsql)) {
+                    $st->execute();
+                    $rr = get_stmt_rows($st);
+                    foreach ($rr as $r) $quizTitleMap[$r['quiz_id']] = $r['title'];
+                    $st->close();
+                }
+            }
+
+            if ($resTimeCol !== null) {
+                $sqlR = "
+                    SELECT r.student_id, r.quiz_id,
+                           ".(colExists($conn,'quiz_results','score') ? "r.score" : "NULL AS score").",
+                           r.`{$resTimeCol}` AS tstamp
+                    FROM quiz_results r
+                    INNER JOIN (
+                        SELECT student_id, quiz_id, MAX(`{$resTimeCol}`) AS last_time
+                        FROM quiz_results
+                        WHERE CAST(student_id AS CHAR) IN ({$ph})
+                        GROUP BY student_id, quiz_id
+                    ) t
+                    ON r.student_id = t.student_id
+                       AND r.quiz_id = t.quiz_id
+                       AND r.`{$resTimeCol}` = t.last_time
+                    WHERE CAST(r.student_id AS CHAR) IN ({$ph})
+                    ORDER BY r.student_id, r.quiz_id
+                ";
+                if ($st = $conn->prepare($sqlR)) {
+                    $st->bind_param($types.$types, ...array_merge($studentIdList, $studentIdList));
+                    $st->execute();
+                    $rowsR = get_stmt_rows($st);
+                    $debug_found_results = count($rowsR);
+                    foreach ($rowsR as $a) {
+                        $sid = (string)$a['student_id'];
+                        if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
+                        $title = $quizTitleMap[$a['quiz_id']] ?? ('Quiz#'.$a['quiz_id']);
+                        $quizStats[$sid][] = [
+                            'quiz_id'    => $a['quiz_id'],
+                            'quiz_title' => $title,
+                            'score'      => $a['score'],
+                            'status'     => null,
+                            'time'       => $a['tstamp'],
+                        ];
+                    }
+                    $st->close();
+                } else {
+                    error_log("Failed to prepare results query: ".$conn->error);
+                }
+            }
+        }
+
+        if (!empty($selectedGroupId)) {
+            $sourceNote .= ($sourceNote ? ' | ' : '') .
+                           "quiz_attempts={$debug_found_attempts}, quiz_results={$debug_found_results}";
         }
     }
 }
@@ -322,659 +716,103 @@ if ($selectedGroupId) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ระบบจัดการเรียนการสอน - อาจารย์</title>
+<title>หน้าหลัก - อาจารย์</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 :root {
-    --primary-color: #1e40af;
-    --primary-hover: #1d4ed8;
-    --secondary-color: #475569;
-    --success-color: #059669;
-    --warning-color: #d97706;
-    --danger-color: #dc2626;
-    --info-color: #0891b2;
-    --light-bg: #f8fafc;
-    --white: #ffffff;
-    --gray-50: #f9fafb;
-    --gray-100: #f3f4f6;
-    --gray-200: #e5e7eb;
-    --gray-300: #d1d5db;
-    --gray-400: #9ca3af;
-    --gray-500: #6b7280;
-    --gray-600: #4b5563;
-    --gray-700: #374151;
-    --gray-800: #1f2937;
-    --gray-900: #111827;
-    --border-radius: 12px;
-    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --primary-color: #1e40af; --primary-hover: #1d4ed8; --secondary-color: #475569;
+    --success-color: #059669; --warning-color: #d97706; --danger-color: #dc2626; --info-color: #0891b2;
+    --light-bg: #f8fafc; --white: #ffffff; --gray-50: #f9fafb; --gray-100: #f3f4f6; --gray-200: #e5e7eb;
+    --gray-300: #d1d5db; --gray-400: #9ca3af; --gray-500: #6b7280; --gray-600: #4b5563; --gray-700: #374151;
+    --gray-800: #1f2937; --gray-900: #111827; --border-radius: 12px; --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
     --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
     --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
     --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
 }
-
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
-body {
-    font-family: 'Sarabun', sans-serif;
-    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-    color: var(--gray-800);
-    line-height: 1.6;
-    min-height: 100vh;
-}
-
-.container {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 2rem 1rem;
-}
-
-/* Header Styles */
-.header {
-    background: var(--white);
-    border-radius: var(--border-radius);
-    box-shadow: var(--shadow-lg);
-    padding: 2rem;
-    margin-bottom: 2rem;
-    border: 1px solid var(--gray-200);
-}
-
-.header-content {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 1.5rem;
-}
-
-.header-title {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-.header-title i {
-    color: var(--primary-color);
-    font-size: 2rem;
-    padding: 0.75rem;
-    background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-    border-radius: 50%;
-}
-
-.header-title h1 {
-    font-size: 1.875rem;
-    font-weight: 700;
-    color: var(--gray-900);
-    margin: 0;
-}
-
-.header-subtitle {
-    color: var(--gray-600);
-    font-size: 0.95rem;
-    margin-top: 0.25rem;
-}
-
-.header-actions {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-/* Button Styles */
-.btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem 1.5rem;
-    border: none;
-    border-radius: var(--border-radius);
-    font-size: 0.9rem;
-    font-weight: 500;
-    text-decoration: none;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    font-family: inherit;
-}
-
-.btn-primary {
-    background: linear-gradient(135deg, var(--primary-color), var(--primary-hover));
-    color: var(--white);
-    box-shadow: var(--shadow-sm);
-}
-
-.btn-primary:hover {
-    background: linear-gradient(135deg, var(--primary-hover), #1e3a8a);
-    box-shadow: var(--shadow-md);
-    transform: translateY(-1px);
-}
-
-.btn-secondary {
-    background: var(--gray-100);
-    color: var(--gray-700);
-    border: 1px solid var(--gray-300);
-}
-
-.btn-secondary:hover {
-    background: var(--gray-200);
-    border-color: var(--gray-400);
-}
-
-.btn-outline {
-    background: transparent;
-    color: var(--gray-600);
-    border: 1px solid var(--gray-300);
-}
-
-.btn-outline:hover {
-    background: var(--gray-50);
-    color: var(--gray-800);
-}
-
-.btn-danger {
-    background: linear-gradient(135deg, var(--danger-color), #b91c1c);
-    color: var(--white);
-}
-
-.btn-danger:hover {
-    background: linear-gradient(135deg, #b91c1c, #991b1b);
-    transform: translateY(-1px);
-}
-
-/* Alert Styles */
-.alert {
-    padding: 1rem 1.5rem;
-    border-radius: var(--border-radius);
-    margin-bottom: 2rem;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    font-weight: 500;
-    box-shadow: var(--shadow-sm);
-}
-
-.alert-success {
-    background: linear-gradient(135deg, #dcfce7, #bbf7d0);
-    color: #166534;
-    border: 1px solid #86efac;
-}
-
-.alert-error {
-    background: linear-gradient(135deg, #fef2f2, #fecaca);
-    color: #991b1b;
-    border: 1px solid #fca5a5;
-}
-
-.alert i {
-    font-size: 1.25rem;
-}
-
-/* Card Styles */
-.card {
-    background: var(--white);
-    border-radius: var(--border-radius);
-    border: 1px solid var(--gray-200);
-    box-shadow: var(--shadow-lg);
-    overflow: hidden;
-    transition: all 0.3s ease;
-}
-
-.card:hover {
-    box-shadow: var(--shadow-xl);
-    transform: translateY(-2px);
-}
-
-.card-header {
-    padding: 1.5rem;
-    border-bottom: 1px solid var(--gray-200);
-    background: linear-gradient(135deg, var(--gray-50), var(--white));
-}
-
-.card-header h3 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--gray-900);
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.card-header i {
-    color: var(--primary-color);
-    font-size: 1.125rem;
-}
-
-.card-body {
-    padding: 1.5rem;
-}
-
-/* Grid Layout */
-.grid {
-    display: grid;
-    gap: 2rem;
-    grid-template-columns: 1fr;
-}
-
-@media (min-width: 1024px) {
-    .grid {
-        grid-template-columns: 400px 1fr;
-    }
-}
-
-/* Group List Styles */
-.group-list {
-    list-style: none;
-}
-
-.group-item {
-    background: linear-gradient(135deg, var(--white), var(--gray-50));
-    border: 1px solid var(--gray-200);
-    border-radius: var(--border-radius);
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    transition: all 0.3s ease;
-}
-
-.group-item:hover {
-    box-shadow: var(--shadow-md);
-    border-color: var(--primary-color);
-    transform: translateX(4px);
-}
-
-.group-item-content {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-}
-
-.group-info h4 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--gray-900);
-    margin-bottom: 0.5rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.group-info h4 i {
-    color: var(--primary-color);
-    font-size: 1rem;
-}
-
-.group-meta {
-    color: var(--gray-600);
-    font-size: 0.9rem;
-}
-
-.group-meta .meta-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.25rem;
-}
-
-.group-meta i {
-    color: var(--gray-400);
-    font-size: 0.8rem;
-    width: 1rem;
-}
-
-.code {
-    font-family: 'Courier New', monospace;
-    background: var(--gray-100);
-    padding: 0.125rem 0.375rem;
-    border-radius: 4px;
-    font-size: 0.85rem;
-    color: var(--gray-700);
-    border: 1px solid var(--gray-300);
-}
-
-/* Table Styles */
-.table-container {
-    overflow-x: auto;
-    border-radius: var(--border-radius);
-    border: 1px solid var(--gray-200);
-}
-
-.table {
-    width: 100%;
-    border-collapse: collapse;
-    background: var(--white);
-}
-
-.table th {
-    background: linear-gradient(135deg, var(--gray-50), var(--gray-100));
-    color: var(--gray-800);
-    font-weight: 600;
-    padding: 1rem;
-    text-align: left;
-    border-bottom: 2px solid var(--gray-300);
-    font-size: 0.9rem;
-}
-
-.table td {
-    padding: 1rem;
-    border-bottom: 1px solid var(--gray-200);
-    vertical-align: top;
-}
-
-.table tbody tr:hover {
-    background: var(--gray-50);
-}
-
-.table tbody tr:last-child td {
-    border-bottom: none;
-}
-
-/* Badge Styles */
-.badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-    padding: 0.25rem 0.75rem;
-    border-radius: 9999px;
-    font-size: 0.8rem;
-    font-weight: 500;
-    margin-bottom: 0.5rem;
-    margin-right: 0.5rem;
-}
-
-.badge-primary {
-    background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-    color: var(--primary-color);
-    border: 1px solid #93c5fd;
-}
-
-.badge-success {
-    background: linear-gradient(135deg, #dcfce7, #bbf7d0);
-    color: var(--success-color);
-    border: 1px solid #86efac;
-}
-
-.badge-warning {
-    background: linear-gradient(135deg, #fef3c7, #fde68a);
-    color: var(--warning-color);
-    border: 1px solid #fbbf24;
-}
-
-.quiz-score {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.5rem;
-}
-
-.score-value {
-    font-weight: 600;
-    color: var(--primary-color);
-    background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-    padding: 0.25rem 0.75rem;
-    border-radius: 6px;
-    border: 1px solid #93c5fd;
-}
-
-/* Empty State */
-.empty-state {
-    text-align: center;
-    padding: 3rem 2rem;
-    color: var(--gray-500);
-}
-
-.empty-state i {
-    font-size: 3rem;
-    color: var(--gray-400);
-    margin-bottom: 1rem;
-}
-
-.empty-state h4 {
-    font-size: 1.125rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--gray-600);
-}
-
-.empty-state p {
-    font-size: 0.9rem;
-    color: var(--gray-500);
-}
-
-/* Modal Styles */
-.modal {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-    z-index: 1000;
-    animation: fadeIn 0.3s ease;
-}
-
-.modal.show {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1rem;
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-}
-
-.modal-content {
-    background: var(--white);
-    border-radius: var(--border-radius);
-    width: 100%;
-    max-width: 500px;
-    box-shadow: var(--shadow-xl);
-    animation: slideUp 0.3s ease;
-}
-
-@keyframes slideUp {
-    from {
-        opacity: 0;
-        transform: translateY(20px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.modal-header {
-    padding: 1.5rem;
-    border-bottom: 1px solid var(--gray-200);
-    background: linear-gradient(135deg, var(--gray-50), var(--white));
-    border-radius: var(--border-radius) var(--border-radius) 0 0;
-}
-
-.modal-header h3 {
-    margin: 0;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: var(--gray-900);
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.modal-header i {
-    color: var(--primary-color);
-}
-
-.modal-close {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    background: none;
-    border: none;
-    font-size: 1.5rem;
-    color: var(--gray-400);
-    cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 50%;
-    transition: all 0.3s ease;
-}
-
-.modal-close:hover {
-    background: var(--gray-100);
-    color: var(--gray-600);
-}
-
-.modal-body {
-    padding: 1.5rem;
-}
-
-.modal-footer {
-    padding: 1rem 1.5rem;
-    border-top: 1px solid var(--gray-200);
-    background: var(--gray-50);
-    display: flex;
-    justify-content: flex-end;
-    gap: 1rem;
-    border-radius: 0 0 var(--border-radius) var(--border-radius);
-}
-
-/* Form Styles */
-.form-group {
-    margin-bottom: 1.5rem;
-}
-
-.form-label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    font-size: 0.9rem;
-}
-
-.form-label.required::after {
-    content: ' *';
-    color: var(--danger-color);
-}
-
-.form-input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    border: 2px solid var(--gray-300);
-    border-radius: var(--border-radius);
-    font-size: 0.9rem;
-    font-family: inherit;
-    transition: all 0.3s ease;
-    background: var(--white);
-}
-
-.form-input:focus {
-    outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-.form-help {
-    margin-top: 0.5rem;
-    font-size: 0.8rem;
-    color: var(--gray-500);
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.form-help i {
-    color: var(--info-color);
-}
-
-/* Status Indicators */
-.status {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-    font-size: 0.8rem;
-    font-weight: 500;
-}
-
-.status-completed {
-    color: var(--success-color);
-}
-
-.status-pending {
-    color: var(--warning-color);
-}
-
-.status-failed {
-    color: var(--danger-color);
-}
-
-.status i {
-    font-size: 0.75rem;
-}
-
-/* Responsive Design */
-@media (max-width: 768px) {
-    .container {
-        padding: 1rem;
-    }
-    
-    .header-content {
-        flex-direction: column;
-        text-align: center;
-    }
-    
-    .header-title {
-        flex-direction: column;
-    }
-    
-    .grid {
-        grid-template-columns: 1fr;
-    }
-    
-    .group-item-content {
-        flex-direction: column;
-        align-items: stretch;
-    }
-    
-    .table-container {
-        font-size: 0.85rem;
-    }
-    
-    .table th,
-    .table td {
-        padding: 0.75rem 0.5rem;
-    }
-}
-
-/* Utility Classes */
-.text-center { text-align: center; }
-.text-right { text-align: right; }
-.mb-0 { margin-bottom: 0; }
-.mb-1 { margin-bottom: 0.5rem; }
-.mb-2 { margin-bottom: 1rem; }
-.mt-2 { margin-top: 1rem; }
-.font-mono { font-family: 'Courier New', monospace; }
-.text-sm { font-size: 0.875rem; }
-.text-xs { font-size: 0.75rem; }
-.font-semibold { font-weight: 600; }
-.text-muted { color: var(--gray-500); }
-
-/* Loading Animation */
-.loading {
-    display: inline-block;
-    width: 1rem;
-    height: 1rem;
-    border: 2px solid var(--gray-300);
-    border-radius: 50%;
-    border-top-color: var(--primary-color);
-    animation: spin 1s ease-in-out infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
-}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Sarabun',sans-serif;background:linear-gradient(135deg,#f0f9ff 0%,#e0f2fe 100%);color:var(--gray-800);line-height:1.6;min-height:100vh}
+.container{max-width:1400px;margin:0 auto;padding:2rem 1rem}
+
+/* Header */
+.header{background:var(--white);border-radius:var(--border-radius);box-shadow:var(--shadow-lg);padding:2rem;margin-bottom:2rem;border:1px solid var(--gray-200)}
+.header-content{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1.5rem}
+.header-title{display:flex;align-items:center;gap:1rem}
+.header-title i{color:var(--primary-color);font-size:2rem;padding:.75rem;background:linear-gradient(135deg,#dbeafe,#bfdbfe);border-radius:50%}
+.header-title h1{font-size:1.875rem;font-weight:700;color:var(--gray-900);margin:0}
+.header-subtitle{color:var(--gray-600);font-size:.95rem;margin-top:.25rem}
+.header-actions{display:flex;align-items:center;gap:1rem;flex-wrap:wrap} /* ✅ กันปุ่มหาย */
+
+/* Profile chip */
+.profile{display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px solid var(--gray-200);border-radius:9999px;background:linear-gradient(135deg,#fff,#f8fafc);box-shadow:var(--shadow-sm)}
+.profile i{color:var(--primary-color)}
+.profile .p-name{font-weight:600;color:var(--gray-900)}
+.profile .p-sub{font-size:.85rem;color:var(--gray-600)}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:.5rem;padding:.75rem 1.5rem;border:none;border-radius:var(--border-radius);font-size:.9rem;font-weight:500;text-decoration:none;cursor:pointer;transition:.3s;font-family:inherit;white-space:nowrap}
+.btn-primary{background:linear-gradient(135deg,var(--primary-color),var(--primary-hover));color:#fff;box-shadow:var(--shadow-sm)}
+.btn-primary:hover{background:linear-gradient(135deg,var(--primary-hover),#1e3a8a);box-shadow:var(--shadow-md);transform:translateY(-1px)}
+.btn-secondary{background:var(--gray-100);color:var(--gray-700);border:1px solid var(--gray-300)}
+.btn-secondary:hover{background:var(--gray-200);border-color:var(--gray-400)}
+.btn-outline{background:transparent;color:var(--gray-600);border:1px solid var(--gray-300)}
+.btn-outline:hover{background:var(--gray-50);color:var(--gray-800)}
+
+/* Cards / table */
+.card{background:#fff;border-radius:var(--border-radius);border:1px solid var(--gray-200);box-shadow:var(--shadow-lg);overflow:hidden;transition:.3s}
+.card:hover{box-shadow:var(--shadow-xl);transform:translateY(-2px)}
+.card-header{padding:1.5rem;border-bottom:1px solid var(--gray-200);background:linear-gradient(135deg,var(--gray-50),#fff)}
+.card-header h3{font-size:1.25rem;font-weight:600;color:var(--gray-900);margin:0;display:flex;align-items:center;gap:.75rem}
+.card-header i{color:var(--primary-color);font-size:1.125rem}
+.card-body{padding:1.5rem}
+
+.grid{display:grid;gap:2rem;grid-template-columns:1fr}
+@media(min-width:1024px){.grid{grid-template-columns:400px 1fr}}
+
+.group-list{list-style:none}
+.group-item{background:linear-gradient(135deg,#fff,var(--gray-50));border:1px solid var(--gray-200);border-radius:var(--border-radius);padding:1.5rem;margin-bottom:1rem;transition:.3s}
+.group-item:hover{box-shadow:var(--shadow-md);border-color:var(--primary-color);transform:translateX(4px)}
+.group-item-content{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem}
+.group-info h4{font-size:1.1rem;font-weight:600;color:var(--gray-900);margin-bottom:.5rem;display:flex;align-items:center;gap:.5rem}
+.group-meta{color:var(--gray-600);font-size:.9rem}
+.group-meta .meta-item{display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem}
+.code{font-family:'Courier New',monospace;background:var(--gray-100);padding:.125rem .375rem;border-radius:4px;font-size:.85rem;color:var(--gray-700);border:1px solid var(--gray-300)}
+
+.table-container{overflow-x:auto;border-radius:var(--border-radius);border:1px solid var(--gray-200)}
+.table{width:100%;border-collapse:collapse;background:#fff}
+.table th{background:linear-gradient(135deg,var(--gray-50),var(--gray-100));color:var(--gray-800);font-weight:600;padding:1rem;text-align:left;border-bottom:2px solid var(--gray-300);font-size:.9rem}
+.table td{padding:1rem;border-bottom:1px solid var(--gray-200);vertical-align:top}
+.table tbody tr:hover{background:var(--gray-50)}
+
+.badge{display:inline-flex;align-items:center;gap:.375rem;padding:.25rem .75rem;border-radius:9999px;font-size:.8rem;font-weight:500;margin:.5rem .5rem .5rem 0}
+.badge-primary{background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:var(--primary-color);border:1px solid #93c5fd}
+.badge-success{background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:var(--success-color);border:1px solid #86efac}
+.badge-warning{background:linear-gradient(135deg,#fef3c7,#fde68a);color:var(--warning-color);border:1px solid #fbbf24}
+
+.empty-state{text-align:center;padding:3rem 2rem;color:#6b7280}
+.empty-state i{font-size:3rem;color:#9ca3af;margin-bottom:1rem}
+.empty-state h4{font-size:1.125rem;font-weight:600;margin-bottom:.5rem;color:#4b5563}
+
+@media(max-width:768px){
+  .container{padding:1rem}
+  .header-content{flex-direction:column;text-align:center}
+  .header-title{flex-direction:column}
+  .grid{grid-template-columns:1fr}
+  .group-item-content{flex-direction:column;align-items:stretch}
+  .table-container{font-size:.85rem}
+  .table th,.table td{padding:.75rem .5rem}
+}
+.text-xs{font-size:.75rem}.font-semibold{font-weight:600}.text-muted{color:#6b7280}
+
+/* Modal */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:1000}
+.modal.show{display:flex;align-items:center;justify-content:center;padding:1rem}
+.modal-content{background:#fff;border-radius:var(--border-radius);width:100%;max-width:500px;box-shadow:var(--shadow-xl)}
+.modal-header{padding:1.5rem;border-bottom:1px solid var(--gray-200);background:linear-gradient(135deg,var(--gray-50),#fff);border-radius:var(--border-radius) var(--border-radius) 0 0;position:relative}
+.modal-header h3{margin:0;font-size:1.25rem;font-weight:600;color:var(--gray-900);display:flex;align-items:center;gap:.75rem}
+.modal-header .modal-close{position:absolute;top:1rem;right:1rem;background:none;border:none;font-size:1.5rem;color:#9ca3af;cursor:pointer}
+.modal-body{padding:1.5rem}
+.modal-footer{padding:1rem 1.5rem;border-top:1px solid var(--gray-200);background:var(--gray-50);display:flex;justify-content:flex-end;gap:1rem;border-radius:0 0 var(--border-radius) var(--border-radius)}
 </style>
 </head>
 <body>
@@ -985,18 +823,34 @@ body {
             <div class="header-title">
                 <i class="fas fa-chalkboard-teacher"></i>
                 <div>
-                    <h1>ระบบจัดการเรียนการสอน</h1>
-                    <div class="header-subtitle">แดชบอร์ดอาจารย์ผู้สอน</div>
+                    <h2>ระบบแนะนำรายวิชาชีพเลือกด้วยต้นไม้ตัดสินใจ</h2>
+                    <div class="header-subtitle">หน้าหลักอาจารย์</div>
                 </div>
             </div>
             <div class="header-actions">
+                <div class="profile" title="ข้อมูลอาจารย์">
+                    <i class="fas fa-user-tie"></i>
+                    <div>
+                        <div class="p-name"><?=h($teacherProfile['name'] ?: 'อาจารย์')?></div>
+                        <div class="p-sub">
+                            <?php if ($teacherProfile['username']): ?>
+                                <span><i class="fas fa-at"></i> <?=h($teacherProfile['username'])?></span>
+                            <?php endif; ?>
+                            <?php if ($teacherProfile['email']): ?>
+                                &nbsp;·&nbsp;<span><i class="fas fa-envelope"></i> <?=h($teacherProfile['email'])?></span>
+                            <?php endif; ?>
+                            <?php if ($teacherProfile['phone']): ?>
+                                &nbsp;·&nbsp;<span><i class="fas fa-phone"></i> <?=h($teacherProfile['phone'])?></span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
                 <button class="btn btn-primary" onclick="openModal('pwModal')">
-                    <i class="fas fa-key"></i>
-                    เปลี่ยนรหัสผ่าน
+                    <i class="fas fa-key"></i> เปลี่ยนรหัสผ่าน
                 </button>
                 <a class="btn btn-outline" href="logout.php">
-                    <i class="fas fa-sign-out-alt"></i>
-                    ออกจากระบบ
+                    <i class="fas fa-sign-out-alt"></i> ออกจากระบบ
                 </a>
             </div>
         </div>
@@ -1004,160 +858,100 @@ body {
 
     <!-- Alerts -->
     <?php if ($pw_success): ?>
-        <div class="alert alert-success">
-            <i class="fas fa-check-circle"></i>
-            <?=h($pw_success)?>
-        </div>
+        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <?=h($pw_success)?></div>
     <?php elseif ($pw_error): ?>
-        <div class="alert alert-error">
-            <i class="fas fa-exclamation-circle"></i>
-            <?=h($pw_error)?>
-        </div>
+        <div class="alert alert-error"><i class="fas fa-exclamation-circle"></i> <?=h($pw_error)?></div>
     <?php endif; ?>
 
-    <!-- Main Content -->
+    <!-- Main -->
     <div class="grid">
-        <!-- Groups Section -->
+        <!-- Groups -->
         <div class="card">
-            <div class="card-header">
-                <h3>
-                    <i class="fas fa-users"></i>
-                    กลุ่มเรียนที่รับผิดชอบ
-                </h3>
-            </div>
+            <div class="card-header"><h3><i class="fas fa-users"></i> กลุ่มเรียนที่รับผิดชอบ</h3></div>
             <div class="card-body">
                 <?php if (!$groups): ?>
-                    <div class="empty-state">
-                        <i class="fas fa-inbox"></i>
-                        <h4>ยังไม่มีกลุ่มเรียน</h4>
-                        <p>ยังไม่มีกลุ่มเรียนที่ผูกกับอาจารย์คนนี้</p>
-                    </div>
+                    <div class="empty-state"><i class="fas fa-inbox"></i><h4>ยังไม่มีกลุ่มเรียน</h4><p>ยังไม่มีกลุ่มเรียนที่ผูกกับอาจารย์คนนี้</p></div>
                 <?php else: ?>
                     <ul class="group-list">
                         <?php foreach($groups as $g): ?>
                             <li class="group-item">
                                 <div class="group-item-content">
                                     <div class="group-info">
-                                        <h4>
-                                            <i class="fas fa-graduation-cap"></i>
-                                            <?=h($g['group_name'])?>
-                                        </h4>
+                                        <h4><i class="fas fa-graduation-cap"></i> <?=h($g['group_name'])?></h4>
                                         <div class="group-meta">
-                                            <div class="meta-item">
-                                                <i class="fas fa-book"></i>
-                                                <span>วิชา: <?=h($g['course_name'])?></span>
-                                            </div>
-                                            <div class="meta-item">
-                                                <i class="fas fa-hashtag"></i>
-                                                <span>รหัสกลุ่ม: <span class="code"><?=h($g['group_id'])?></span></span>
-                                            </div>
+                                            <div class="meta-item"><i class="fas fa-book"></i><span>วิชา: <?=h($g['course_name'])?></span></div>
+                                            <div class="meta-item"><i class="fas fa-hashtag"></i><span>รหัสกลุ่ม: <span class="code"><?=h($g['group_id'])?></span></span></div>
                                             <?php if(!empty($g['curriculum_value'])): ?>
-                                                <div class="meta-item">
-                                                    <i class="fas fa-clipboard-list"></i>
-                                                    <span>หลักสูตร: <span class="code"><?=h($g['curriculum_value'])?></span></span>
-                                                </div>
+                                                <div class="meta-item"><i class="fas fa-clipboard-list"></i><span>หลักสูตร: <span class="code"><?=h($g['curriculum_value'])?></span></span></div>
                                             <?php endif; ?>
                                         </div>
                                     </div>
                                     <div>
-                                        <a class="btn btn-primary" href="?group_id=<?=urlencode($g['group_id'])?>">
-                                            <i class="fas fa-eye"></i>
-                                            ดูรายชื่อ
-                                        </a>
+                                        <a class="btn btn-primary" href="?group_id=<?=urlencode($g['group_id'])?>"><i class="fas fa-eye"></i> ดูรายชื่อ</a>
                                     </div>
                                 </div>
                             </li>
                         <?php endforeach; ?>
                     </ul>
-                    
-                    <div class="form-help mt-2">
-                        <i class="fas fa-info-circle"></i>
-                        แหล่งข้อมูล: <span class="code">course_groups</span>, <span class="code">courses</span>
-                    </div>
                 <?php endif; ?>
             </div>
         </div>
 
-        <!-- Students Section -->
+        <!-- Students -->
         <div class="card">
-            <div class="card-header">
-                <h3>
-                    <i class="fas fa-user-graduate"></i>
-                    รายชื่อนักศึกษาและผลการเรียน
-                </h3>
-            </div>
+            <div class="card-header"><h3><i class="fas fa-user-graduate"></i> รายชื่อนักศึกษาและผลทดสอบ</h3></div>
             <div class="card-body">
                 <?php if (!$selectedGroupId): ?>
-                    <div class="empty-state">
-                        <i class="fas fa-mouse-pointer"></i>
-                        <h4>เลือกกลุ่มเรียน</h4>
-                        <p>เลือกกลุ่มจากด้านซ้ายเพื่อแสดงรายชื่อนักศึกษาและคะแนนสอบ</p>
-                    </div>
+                    <div class="empty-state"><i class="fas fa-mouse-pointer"></i><h4>เลือกกลุ่มเรียน</h4><p>เลือกกลุ่มจากด้านซ้ายเพื่อแสดงรายชื่อนักศึกษาและคะแนนสอบ</p></div>
                 <?php else: ?>
                     <div class="mb-2">
-                        <div class="badge badge-primary">
-                            <i class="fas fa-layer-group"></i>
-                            รหัสกลุ่ม: <?=h($selectedGroupId)?>
-                        </div>
+                        <div class="badge badge-primary"><i class="fas fa-layer-group"></i> รหัสกลุ่ม: <?=h($selectedGroupId)?></div>
                         <?php if($sourceNote): ?>
-                            <div class="badge badge-success">
-                                <i class="fas fa-database"></i>
-                                <?=h($sourceNote)?>
-                            </div>
-                        <?php elseif(!$memberTable && $hasEducationInfo): ?>
-                            <div class="badge badge-warning">
-                                <i class="fas fa-link"></i>
-                                ใช้การผูกตาม curriculum/group_name (education_info)
-                            </div>
-                        <?php elseif(!$memberTable): ?>
-                            <div class="badge badge-warning">
-                                <i class="fas fa-exclamation-triangle"></i>
-                                ไม่พบตารางสมาชิกกลุ่ม
-                            </div>
+                            <div class="badge badge-success"><i class="fas fa-database"></i> <?=h($sourceNote)?></div>
+                        <?php elseif($hasEducationInfo): ?>
+                            <div class="badge badge-warning"><i class="fas fa-link"></i> ใช้การผูกตาม curriculum/group_name (education_info) หากไม่พบตารางสมาชิก</div>
+                        <?php else: ?>
+                            <div class="badge badge-warning"><i class="fas fa-exclamation-triangle"></i> ไม่พบตารางสมาชิกกลุ่ม</div>
                         <?php endif; ?>
                     </div>
 
                     <?php if (!$students): ?>
-                        <div class="empty-state">
-                            <i class="fas fa-user-slash"></i>
-                            <h4>ไม่มีนักศึกษา</h4>
-                            <p>ยังไม่มีนักศึกษาในกลุ่มนี้ หรือข้อมูลสมาชิกยังไม่ถูกผูกกัน</p>
-                        </div>
+                        <div class="empty-state"><i class="fas fa-user-slash"></i><h4>ไม่มีนักศึกษา</h4><p>ยังไม่มีนักศึกษาในกลุ่มนี้ หรือข้อมูลสมาชิกยังไม่ถูกผูกกัน</p></div>
                     <?php else: ?>
                         <div class="table-container">
                             <table class="table">
                                 <thead>
                                     <tr>
-                                        <th style="width: 20%;">
-                                            <i class="fas fa-id-card"></i>
-                                            รหัสนักศึกษา
-                                        </th>
-                                        <th style="width: 30%;">
-                                            <i class="fas fa-user"></i>
-                                            ชื่อ-นามสกุล
-                                        </th>
-                                        <th style="width: 50%;">
-                                            <i class="fas fa-chart-bar"></i>
-                                            ผลการทำแบบทดสอบล่าสุด
-                                        </th>
+                                        <th style="width:18%"><i class="fas fa-id-card"></i> รหัสนักศึกษา</th>
+                                        <th style="width:28%"><i class="fas fa-user"></i> ชื่อ-นามสกุล</th>
+                                        <th style="width:18%"><i class="fas fa-layer-group"></i> กลุ่ม (education_info)</th>
+                                        <th style="width:36%"><i class="fas fa-chart-bar"></i> ผลการทำแบบทดสอบล่าสุด</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                 <?php foreach($students as $st): ?>
+                                    <?php $edu = $studentEdu[$st['student_id']] ?? null; ?>
                                     <tr>
                                         <td>
                                             <span class="code font-semibold"><?=h($st['student_id'])?></span>
                                             <?php if (!empty($st['student_code']) && $st['student_code'] !== $st['student_id']): ?>
-                                                <br><span class="text-muted text-sm">รหัส: <?=h($st['student_code'])?></span>
+                                                <br><span class="text-muted text-xs">รหัส: <?=h($st['student_code'])?></span>
                                             <?php endif; ?>
                                         </td>
                                         <td>
                                             <div class="font-semibold"><?=h($st['student_name'] ?? $st['student_id'])?></div>
                                             <?php if (!empty($st['email'])): ?>
-                                                <div class="text-muted text-sm">
-                                                    <i class="fas fa-envelope"></i>
-                                                    <?=h($st['email'])?>
-                                                </div>
+                                                <div class="text-muted text-xs"><i class="fas fa-envelope"></i> <?=h($st['email'])?></div>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php if ($edu && !empty($edu['student_group'])): ?>
+                                                <span class="code"><?=h($edu['student_group'])?></span>
+                                                <?php if (!empty($edu['curriculum_name'])): ?>
+                                                    <div class="text-muted text-xs"><i class="fas fa-clipboard-list"></i> <?=h($edu['curriculum_name'])?></div>
+                                                <?php endif; ?>
+                                            <?php else: ?>
+                                                <span class="text-muted">-</span>
                                             <?php endif; ?>
                                         </td>
                                         <td>
@@ -1165,22 +959,14 @@ body {
                                                 <?php foreach($quizStats[$st['student_id']] as $q): ?>
                                                     <div class="quiz-score">
                                                         <span class="badge badge-primary"><?=h($q['quiz_title'])?></span>
-                                                        <span class="score-value"><?=h($q['score'])?> คะแนน</span>
-                                                        <span class="status status-<?=($q['status']=='completed'?'completed':($q['status']=='pending'?'pending':'failed'))?>">
-                                                            <i class="fas fa-<?=($q['status']=='completed'?'check-circle':($q['status']=='pending'?'clock':'times-circle'))?>"></i>
-                                                            <?=h($q['status'])?>
-                                                        </span>
-                                                        <span class="text-muted text-xs">
-                                                            <i class="fas fa-calendar-alt"></i>
-                                                            <?=h($q['time'])?>
-                                                        </span>
+                                                        <?php if ($q['score'] !== null && $q['score'] !== ''): ?>
+                                                            <span class="score-value"><?=h($q['score'])?> คะแนน</span>
+                                                        <?php endif; ?>
+                                                        <span class="text-muted text-xs"><i class="fas fa-calendar-alt"></i> <?=h($q['time'])?></span>
                                                     </div>
                                                 <?php endforeach; ?>
                                             <?php else: ?>
-                                                <div class="text-muted">
-                                                    <i class="fas fa-minus-circle"></i>
-                                                    ยังไม่มีข้อมูลการทำแบบทดสอบ
-                                                </div>
+                                                <div class="text-muted"><i class="fas fa-minus-circle"></i> ยังไม่มีข้อมูลการทำแบบทดสอบ</div>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -1188,11 +974,7 @@ body {
                                 </tbody>
                             </table>
                         </div>
-                        
-                        <div class="form-help mt-2">
-                            <i class="fas fa-info-circle"></i>
-                            แหล่งข้อมูลแบบทดสوบ: <span class="code">quizzes</span>, <span class="code">quiz_attempts</span>
-                        </div>
+                       
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
@@ -1200,155 +982,55 @@ body {
     </div>
 </div>
 
-<!-- Password Change Modal -->
+<!-- Password Modal -->
 <div id="pwModal" class="modal" aria-hidden="true">
     <div class="modal-content">
         <div class="modal-header">
-            <h3>
-                <i class="fas fa-key"></i>
-                เปลี่ยนรหัสผ่าน
-            </h3>
-            <button class="modal-close" onclick="closeModal('pwModal')" type="button">
-                <i class="fas fa-times"></i>
-            </button>
+            <h3><i class="fas fa-key"></i> เปลี่ยนรหัสผ่าน</h3>
+            <button class="modal-close" onclick="closeModal('pwModal')" type="button"><i class="fas fa-times"></i></button>
         </div>
-        
         <form method="post" autocomplete="off">
             <div class="modal-body">
                 <input type="hidden" name="action" value="change_password">
                 <input type="hidden" name="csrf_token" value="<?=h($_SESSION['csrf_token'])?>">
-                
                 <div class="form-group">
                     <label class="form-label required">รหัสผ่านปัจจุบัน</label>
                     <input class="form-input" type="password" name="current_password" required>
                 </div>
-                
                 <div class="form-group">
                     <label class="form-label required">รหัสผ่านใหม่</label>
                     <input class="form-input" type="password" name="new_password" minlength="8" required>
-                    <div class="form-help">
-                        <i class="fas fa-info-circle"></i>
-                        รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร
-                    </div>
+                    <div class="form-help"><i class="fas fa-info-circle"></i> รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร</div>
                 </div>
-                
                 <div class="form-group">
                     <label class="form-label required">ยืนยันรหัสผ่านใหม่</label>
                     <input class="form-input" type="password" name="confirm_password" minlength="8" required>
                 </div>
             </div>
-            
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" onclick="resetPwForm()">
-                    <i class="fas fa-undo"></i>
-                    รีเซ็ต
-                </button>
-                <button type="button" class="btn btn-outline" onclick="closeModal('pwModal')">
-                    <i class="fas fa-times"></i>
-                    ยกเลิก
-                </button>
-                <button class="btn btn-primary" type="submit">
-                    <i class="fas fa-save"></i>
-                    บันทึกการเปลี่ยนแปลง
-                </button>
+                <button type="button" class="btn btn-secondary" onclick="resetPwForm()"><i class="fas fa-undo"></i> รีเซ็ต</button>
+                <button type="button" class="btn btn-outline" onclick="closeModal('pwModal')"><i class="fas fa-times"></i> ยกเลิก</button>
+                <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> บันทึกการเปลี่ยนแปลง</button>
             </div>
         </form>
     </div>
 </div>
 
 <script>
-// Modal Functions
-function openModal(id) {
-    const modal = document.getElementById(id);
-    if (!modal) return;
-    
-    modal.style.display = 'flex';
-    modal.classList.add('show');
-    modal.setAttribute('aria-hidden', 'false');
-    document.body.style.overflow = 'hidden';
-    
-    // Focus first input
-    const firstInput = modal.querySelector('input[type="password"]');
-    if (firstInput) {
-        setTimeout(() => firstInput.focus(), 100);
-    }
-}
-
-function closeModal(id) {
-    const modal = document.getElementById(id);
-    if (!modal) return;
-    
-    modal.classList.remove('show');
-    modal.setAttribute('aria-hidden', 'true');
-    document.body.style.overflow = '';
-    
-    setTimeout(() => {
-        modal.style.display = 'none';
-    }, 300);
-}
-
-function resetPwForm() {
-    const form = document.querySelector('#pwModal form');
-    if (!form) return;
-    
-    form.current_password.value = '';
-    form.new_password.value = '';
-    form.confirm_password.value = '';
-    form.current_password.focus();
-}
-
-// Close modal when clicking outside
-window.addEventListener('click', function(event) {
-    const modal = document.getElementById('pwModal');
-    if (modal && event.target === modal) {
-        closeModal('pwModal');
-    }
-});
-
-// Close modal with Escape key
-document.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape') {
-        const modals = document.querySelectorAll('.modal.show');
-        modals.forEach(modal => {
-            closeModal(modal.id);
-        });
-    }
-});
-
-// Form validation
-document.addEventListener('DOMContentLoaded', function() {
-    const form = document.querySelector('#pwModal form');
-    if (!form) return;
-    
-    const newPassword = form.querySelector('input[name="new_password"]');
-    const confirmPassword = form.querySelector('input[name="confirm_password"]');
-    
-    function validatePasswords() {
-        if (newPassword.value && confirmPassword.value) {
-            if (newPassword.value !== confirmPassword.value) {
-                confirmPassword.setCustomValidity('รหัสผ่านไม่ตรงกัน');
-            } else {
-                confirmPassword.setCustomValidity('');
-            }
-        }
-    }
-    
-    newPassword.addEventListener('input', validatePasswords);
-    confirmPassword.addEventListener('input', validatePasswords);
-});
-
-// Auto-hide alerts
-document.addEventListener('DOMContentLoaded', function() {
-    const alerts = document.querySelectorAll('.alert');
-    alerts.forEach(alert => {
-        setTimeout(() => {
-            alert.style.opacity = '0';
-            alert.style.transform = 'translateY(-10px)';
-            setTimeout(() => {
-                alert.remove();
-            }, 300);
-        }, 5000);
-    });
+// Modal + form behaviors (คงเดิม)
+function openModal(id){const m=document.getElementById(id);if(!m)return;m.style.display='flex';m.classList.add('show');m.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';const f=m.querySelector('input[type="password"]');if(f){setTimeout(()=>f.focus(),100);}}
+function closeModal(id){const m=document.getElementById(id);if(!m)return;m.classList.remove('show');m.setAttribute('aria-hidden','true');document.body.style.overflow='';setTimeout(()=>{m.style.display='none';},300);}
+function resetPwForm(){const f=document.querySelector('#pwModal form');if(!f)return;f.current_password.value='';f.new_password.value='';f.confirm_password.value='';f.current_password.focus();}
+window.addEventListener('click',e=>{const m=document.getElementById('pwModal');if(m && e.target===m){closeModal('pwModal');}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelectorAll('.modal.show').forEach(m=>closeModal(m.id));}});
+document.addEventListener('DOMContentLoaded',function(){
+  const f=document.querySelector('#pwModal form'); if(!f) return;
+  const np=f.querySelector('input[name="new_password"]'); const cp=f.querySelector('input[name="confirm_password"]');
+  function v(){ if(np.value && cp.value){ cp.setCustomValidity(np.value!==cp.value?'รหัสผ่านไม่ตรงกัน':''); } }
+  np.addEventListener('input',v); cp.addEventListener('input',v);
+  document.querySelectorAll('.alert').forEach(a=>{
+    setTimeout(()=>{ a.style.opacity='0'; a.style.transform='translateY(-10px)'; setTimeout(()=>a.remove(),300); },5000);
+  });
 });
 </script>
 </body>

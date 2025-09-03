@@ -1,5 +1,6 @@
 <?php 
 // groups_manage.php — จัดการกลุ่มเรียน (เชื่อม education_info.student_group & curriculum_name)
+// Theme: Dark/Glass ให้เหมือนหน้า admin_dashboard.php
 session_start();
 if (empty($_SESSION['loggedin'])) { header('Location: login.php?error=unauthorized'); exit; }
 
@@ -296,7 +297,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
   if (!hash_equals($_SESSION['csrf_token'],$csrf)) { flash('danger','CSRF ไม่ถูกต้อง'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
 
   $act=$_POST['action'];
-  if (in_array($act, ['add_group','edit_group','delete_group','enroll','unenroll','add_teacher'], true) && !$is_admin){
+  if (in_array($act, ['add_group','edit_group','delete_group','enroll','unenroll'], true) && !$is_admin){
     flash('danger','คุณไม่มีสิทธิ์ดำเนินการนี้'); header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
 
@@ -311,7 +312,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     $errs=[];
     if($cur==='')        $errs[]='โปรดเลือกหลักสูตร';
     if($group_name==='') $errs[]='โปรดเลือกกลุ่มเรียน';
-    if($teacher_id==='') $errs[]='โปรดเลือกอาจารย์ผู้สอน';
+    if($teacher_id==='') $errs[]='โปรดเลือกอาจารย์ผที่ปรึกษา';
     if($max_students<1 || $max_students>500) $errs[]='จำนวนนักศึกษาสูงสุด 1–500';
     $ckT=$pdo->prepare("SELECT 1 FROM teacher WHERE teacher_id=? LIMIT 1"); $ckT->execute([$teacher_id]);
     if(!$ckT->fetchColumn()) $errs[]='ไม่พบบัญชีอาจารย์ที่เลือก';
@@ -385,35 +386,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])){
     }
     header("Location: ".$_SERVER['PHP_SELF']); exit;
   }
-
-  /* ---- เพิ่มอาจารย์ (ใหม่) ---- */
-  if ($act==='add_teacher'){
-    $t_name  = trim($_POST['t_name'] ?? '');
-    $t_email = trim($_POST['t_email'] ?? '');
-
-    $errs=[];
-    if ($t_name==='') $errs[]='กรุณากรอกชื่ออาจารย์';
-
-    if($errs){ foreach($errs as $e) flash('danger',$e); header("Location: ".$_SERVER['PHP_SELF']); exit; }
-
-    // ตรวจคอลัมน์ที่มีอยู่จริง
-    $cols = ['name']; $vals = [$t_name]; $ph = ['?'];
-    if (colExists($pdo,'teacher','email') && $t_email!==''){ $cols[]='email'; $vals[]=$t_email; $ph[]='?'; }
-    if (colExists($pdo,'teacher','created_at')){ $cols[]='created_at'; $vals[] = date('Y-m-d H:i:s'); $ph[]='?'; }
-    if (colExists($pdo,'teacher','status')){ $cols[]='status'; $vals[] = 'active'; $ph[]='?'; }
-
-    // กันชื่อซ้ำคร่าว ๆ ถ้ามีคอลัมน์ name
-    $ck = $pdo->prepare("SELECT 1 FROM teacher WHERE name=? LIMIT 1");
-    $ck->execute([$t_name]);
-    if ($ck->fetchColumn()){ flash('danger','มีอาจารย์ชื่อนี้อยู่แล้ว'); header("Location: ".$_SERVER['PHP_SELF']); exit; }
-
-    $sql = "INSERT INTO teacher (".implode(',',$cols).") VALUES (".implode(',',$ph).")";
-    $ins = $pdo->prepare($sql);
-    $ins->execute($vals);
-
-    flash('ok','เพิ่มอาจารย์เรียบร้อย');
-    header("Location: ".$_SERVER['PHP_SELF']); exit;
-  }
 }
 
 /* ===== Initial for rendering ===== */
@@ -431,24 +403,42 @@ $groups_top   = $selected_cur ? groupsByCurriculum($pdo,$selected_cur,$is_admin,
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
 <style>
-:root{--navy:#113F67;--steel:#34699A;--sky:#58A0C8;--sun:#FDF5AA;--text:#eef2f7;--muted:rgba(255,255,255,.78);--line:rgba(255,255,255,.14)}
-*{box-sizing:border-box} body{margin:0;font-family:'Sarabun',system-ui,Segoe UI,Roboto,sans-serif;color:var(--text);
-background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transparent 60%),radial-gradient(700px 500px at 85% 0%, rgba(253,245,170,.18), transparent 60%),linear-gradient(135deg,var(--navy),var(--steel));min-height:100vh}
-.container{max-width:1200px;margin:28px auto;padding:16px}
-.header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
-.title{margin:0;font-size:22px;font-weight:800}.subtitle{color:var(--muted)}
-.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.select, .input{padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:rgba(17,63,103,.35);color:var(--text);min-width:220px}
-.btn{padding:10px 14px;border-radius:10px;border:1px solid var(--line);cursor:pointer;text-decoration:none;font-weight:800}
-.primary{color:#0b243d;background:linear-gradient(135deg,var(--sun),#fff6c8)} .secondary{color:#fff;background:linear-gradient(135deg,var(--steel),var(--sky))}
+:root{
+  --navy:#0f172a; --steel:#1e293b; --sky:#3b82f6; --sun:#fde68a;
+  --text:#e5e7eb; --muted:rgba(229,231,235,.78); --line:rgba(255,255,255,.12);
+  --glass:rgba(255,255,255,.06);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Sarabun',system-ui,Segoe UI,Roboto,sans-serif;color:var(--text);
+background:
+  radial-gradient(900px 600px at 12% 8%, rgba(59,130,246,.25), transparent 60%),
+  radial-gradient(700px 500px at 88% -10%, rgba(253,230,138,.18), transparent 60%),
+  linear-gradient(135deg,var(--navy),var(--steel)); min-height:100vh}
+.container{max-width:1280px;margin:0 auto;padding:20px 16px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 18px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--sky),#60a5fa);display:flex;align-items:center;justify-content:center;color:white;box-shadow:0 10px 24px rgba(59,130,246,.35)}
+.brand h1{margin:0;font-size:22px;font-weight:800}
+.brand small{color:var(--muted);display:block;margin-top:2px}
+.top-actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:10px 14px;border-radius:12px;border:1px solid var(--line);cursor:pointer;text-decoration:none;font-weight:800;display:inline-flex;gap:8px;align-items:center}
+.primary{color:#0b243d;background:linear-gradient(135deg,var(--sun),#fff6c8)}
+.secondary{color:#fff;background:linear-gradient(135deg,#334155,#475569)}
 .danger{background:#dc3545;color:#fff;border-color:rgba(255,255,255,.15)}
-.card{background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:16px;padding:16px;backdrop-filter:blur(10px)}
+.ghost{background:transparent;color:var(--text)}
+.select,.input{padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(17,63,103,.2);color:var(--text);min-width:220px}
+.header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.subtitle{color:var(--muted)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.card{background:var(--glass);border:1px solid var(--line);border-radius:16px;padding:16px;backdrop-filter:blur(10px)}
 .columns{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}
 .table{width:100%;border-collapse:collapse;margin-top:10px}
 .table th,.table td{padding:12px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}
 .table th{background:rgba(255,255,255,.08)}
 .actions{display:flex;gap:8px;flex-wrap:wrap}
-.alert{padding:12px 14px;border-radius:12px;margin:8px 0;border:1px solid}.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35)}.dangerA{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35)}
+.alert{padding:12px 14px;border-radius:12px;margin:8px 0;border:1px solid;display:flex;gap:8px;align-items:center}
+.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35)}
+.dangerA{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35)}
 .muted{color:var(--muted)} .btn-sm{padding:6px 10px;font-weight:700}
 .roster-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000}
@@ -459,15 +449,30 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
 .form-field{display:flex;flex-direction:column;gap:6px}
 .form-field input,.form-field select{padding:10px 12px;border:1px solid #ddd;border-radius:10px}
 .pick{display:flex;gap:8px;align-items:center;margin:6px 0}
+@media (max-width: 980px){ .columns{grid-template-columns:1fr} .select{min-width:180px} }
 </style>
 </head>
 <body>
+
 <div class="container">
-  <div class="header">
-    <div>
-      <h1 class="title"><i class="fas fa-users"></i> จัดการกลุ่มเรียน</h1>
-      <div class="subtitle">กลุ่มเรียนผูกกับ <b>education_info.student_group</b> • หลักสูตรผูกกับ <b>education_info.curriculum_name</b></div>
+  <!-- Top bar ให้กลิ่นเดียวกับ admin_dashboard.php -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo"><i class="fas fa-layer-group"></i></div>
+      <div>
+        <h1>จัดการกลุ่มเรียน</h1>
+        <small>ผูกกับ <b>education_info.student_group</b> • หลักสูตรจาก <b>form_options: curriculum_name</b></small>
+      </div>
     </div>
+    <div class="top-actions">
+      <?php if ($is_admin): ?>
+      <a href="admin_dashboard.php" class="btn secondary"><i class="fas fa-home"></i>หน้าหลัก</a>
+      <?php endif; ?>
+      <a href="logout.php" class="btn ghost"><i class="fas fa-sign-out-alt"></i> ออกจากระบบ</a>
+    </div>
+  </div>
+
+  <div class="header card">
     <div class="toolbar">
       <select id="curriculumSelect" class="select" onchange="reloadGroups()">
         <option value="">— เลือกหลักสูตร —</option>
@@ -494,18 +499,21 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
   </div>
 
   <?php foreach ($flashes as $f): ?>
-    <div class="alert <?php echo $f['t']==='ok'?'ok':'dangerA'; ?>">• <?php echo e($f['m']); ?></div>
+    <div class="alert <?php echo $f['t']==='ok'?'ok':'dangerA'; ?>">
+      <i class="fas <?php echo $f['t']==='ok'?'fa-circle-check':'fa-triangle-exclamation'; ?>"></i>
+      <span><?php echo e($f['m']); ?></span>
+    </div>
   <?php endforeach; ?>
 
   <div class="columns">
     <div class="card">
-      <h3 style="margin:0 0 8px">กลุ่มเรียนในหลักสูตร</h3>
+      <h3 style="margin:0 0 8px"><i class="fas fa-list-ul"></i> กลุ่มเรียนในหลักสูตร</h3>
       <div id="groupsArea"><div class="muted">โปรดเลือกหลักสูตร</div></div>
     </div>
 
     <div class="card">
-      <h3 style="margin:0 0 8px">รายชื่อนักศึกษาในกลุ่ม</h3>
-      <div id="rosterArea"><div class="muted">เลือกกลุ่มจากดรอปดาวด้านบน หรือกด “รายชื่อ” จากตาราง</div></div>
+      <h3 style="margin:0 0 8px"><i class="fas fa-users"></i> รายชื่อนักศึกษาในกลุ่ม</h3>
+      <div id="rosterArea"><div class="muted">เลือกกลุ่มจากดรอปดาวน์ด้านบน หรือกด “รายชื่อ” จากตาราง</div></div>
     </div>
   </div>
 </div>
@@ -542,7 +550,7 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
           </select>
         </div>
         <div class="form-field">
-          <label>อาจารย์ผู้สอน</label>
+          <label>อาจารย์ที่ปรึกษา</label>
           <select name="teacher_id" id="gm_teacher_id" required>
             <option value="">— เลือกอาจารย์ —</option>
             <?php foreach($teachers as $t): ?>
@@ -556,39 +564,8 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
         </div>
       </div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
-        <button type="button" class="btn" onclick="closeModal('groupModal')">ยกเลิก</button>
+        <button type="button" class="btn ghost" onclick="closeModal('groupModal')">ยกเลิก</button>
         <button type="submit" class="btn primary">บันทึก</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Modal: Add Teacher (ใหม่) -->
-<div id="teacherModal" class="modal">
-  <div class="modal-content">
-    <div class="modal-header">
-      <h3>เพิ่มอาจารย์</h3>
-      <span class="close" onclick="closeModal('teacherModal')">&times;</span>
-    </div>
-    <form method="post" id="teacherForm">
-      <input type="hidden" name="csrf_token" value="<?php echo e($_SESSION['csrf_token']); ?>">
-      <input type="hidden" name="action" value="add_teacher">
-      <div class="form-grid">
-        <div class="form-field">
-          <label>ชื่ออาจารย์ <span style="color:#dc2626">*</span></label>
-          <input type="text" name="t_name" id="t_name" required placeholder="เช่น อ.สมชาย ใจดี">
-        </div>
-        <div class="form-field">
-          <label>อีเมล (ถ้ามี)</label>
-          <input type="email" name="t_email" id="t_email" placeholder="name@example.com">
-        </div>
-      </div>
-      <p class="muted" style="margin-top:6px">
-        * ระบบจะบันทึกเฉพาะคอลัมน์ที่มีอยู่จริงในตาราง <b>teacher</b> (อย่างน้อยต้องมี <b>name</b>)
-      </p>
-      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
-        <button type="button" class="btn" onclick="closeModal('teacherModal')">ยกเลิก</button>
-        <button type="submit" class="btn secondary">เพิ่มอาจารย์</button>
       </div>
     </form>
   </div>
@@ -607,7 +584,7 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
       <input type="hidden" name="group_id" id="dg_group_id">
       <p>ต้องการลบกลุ่ม <b id="dg_group_name"></b> ใช่หรือไม่?</p>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
-        <button type="button" class="btn" onclick="closeModal('delGroupModal')">ยกเลิก</button>
+        <button type="button" class="btn ghost" onclick="closeModal('delGroupModal')">ยกเลิก</button>
         <button type="submit" class="btn danger">ลบ</button>
       </div>
     </form>
@@ -630,7 +607,7 @@ background:radial-gradient(900px 600px at 15% 10%, rgba(88,160,200,.25), transpa
         <div class="muted">กรอกคำค้นแล้วกดค้นหา</div>
       </div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
-        <button type="button" class="btn" onclick="closeModal('enrollModal')">ยกเลิก</button>
+        <button type="button" class="btn ghost" onclick="closeModal('enrollModal')">ยกเลิก</button>
         <button type="submit" class="btn primary">เพิ่มที่เลือก</button>
       </div>
     </form>
@@ -668,10 +645,6 @@ function openAddGroup(){
   $('gm_max').value='40';
   $('groupModal').style.display='block';
 }
-function openAddTeacher(){
-  $('t_name').value=''; $('t_email').value='';
-  $('teacherModal').style.display='block';
-}
 function openEditGroupFromBtn(btn){
   const d = btn.dataset; // id, cur, name, teacherId, max
   openEditGroup(d.id, d.cur, d.name, d.teacherId, d.max);
@@ -702,7 +675,7 @@ function loadStudentOptions(){
 <?php endif; ?>
 
 function closeModal(id){ const el=$(id); if(el) el.style.display='none'; }
-window.onclick=function(ev){ ['groupModal','teacherModal','delGroupModal','enrollModal'].forEach(mid=>{ const el=$(mid); if(el && ev.target===el) el.style.display='none'; }); };
+window.onclick=function(ev){ ['groupModal','delGroupModal','enrollModal'].forEach(mid=>{ const el=$(mid); if(el && ev.target===el) el.style.display='none'; }); };
 
 document.addEventListener('DOMContentLoaded', function () {
   loadGroupsTableForCurrentCur();

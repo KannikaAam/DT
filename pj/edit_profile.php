@@ -40,6 +40,7 @@ function normalize_term_for_db($v){
 /* ---------- LOAD CURRENT ---------- */
 $message = ''; $error = ''; $student = [];
 
+/* แก้เฉพาะตรงนี้: เปลี่ยน e.academic_year → e.education_year (คงทุกอย่างอื่นไว้เหมือนเดิม) */
 $sql = "SELECT
           p.id AS personal_id, p.full_name, p.birthdate, p.gender, p.citizen_id,
           p.address, p.phone, p.email, p.profile_picture,

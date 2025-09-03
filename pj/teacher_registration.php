@@ -196,28 +196,18 @@ $admin_name = $_SESSION['admin_username'] ?? 'ผู้ดูแลระบบ'
             <div class="user-role">ผู้ดูแลระบบ</div>
           </div>
         </div>
+        <a class="logout-btn" href="admin_dashboard.php">
+          <i class="fas fa-sign-out-alt"></i><span>กลับสู่หน้าหลัก</span>
+        </a>
         <a class="logout-btn" href="logout.php">
           <i class="fas fa-sign-out-alt"></i><span>ออกจากระบบ</span>
         </a>
+        
       </div>
     </nav>
 
     <main class="main-content">
       <h2 class="section-header">เมนูด่วน</h2>
-
-      <!-- ถ้ามีส่วนสถิติในอนาคต ใช้ block ด้านล่างเพื่อความกลมกลืน -->
-      <!--
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-icon"><i class="fa-solid fa-users"></i></div>
-          <div>
-            <div class="stat-label">ผู้ใช้งาน</div>
-            <div class="stat-number">—</div>
-          </div>
-        </div>
-        ...
-      </div>
-      -->
 
       <div class="card-container">
         <a class="action-card" href="admin_add_teacher.php">
@@ -244,7 +234,6 @@ $admin_name = $_SESSION['admin_username'] ?? 'ผู้ดูแลระบบ'
   </div>
 
   <script>
-    // ไม่ต้องมีสคริปต์เพิ่มเติม — โทนและ UI เหมือนหน้าหลักอื่นแล้ว
   </script>
 </body>
 </html>

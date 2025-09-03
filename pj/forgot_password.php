@@ -27,7 +27,7 @@ h1{margin:0 0 8px} .sub{color:var(--muted)}
     <div class="grid">
       <div class="opt">
         <h3>นักศึกษา</h3>
-        <div class="sub" style="margin-bottom:10px">ขอรีเซ็ตรหัสด้วยรหัสนักศึกษาหรืออีเมล</div>
+        <div class="sub" style="margin-bottom:10px">เปลี่ยนรหัสผ่าน</div>
         <a class="btn" href="student_forgot_password.php">ไปหน้าของนักศึกษา</a>
       </div>
       <div class="opt">

@@ -1,4 +1,4 @@
-<?php 
+<?php  
 /* ===========================================================
    manage_courses_and_options.php (v5 - Bulk Add Feature)
    - Courses: Added bulk add via textarea
@@ -54,8 +54,8 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS courses (
   UNIQUE KEY uniq_course_code (course_code)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
 
-/* ===== Auto-migrate: courses =====
-   (ตัดคอลัมน์ is_active, sort_order) */
+/* ===== Auto-migrate: courses (ซ้ำกับด้านบนโดยตั้งใจ — ไม่ลบออกตามคำสั่ง) =====
+   (รอบนี้เพิ่มฟิลด์อ้างอิงหลักสูตร) */
 $pdo->exec("CREATE TABLE IF NOT EXISTS courses (
   id INT AUTO_INCREMENT PRIMARY KEY,
   course_code VARCHAR(32) NOT NULL,
@@ -75,9 +75,12 @@ try { $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_name_value VARCHAR(1
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_year_value VARCHAR(100) NULL"); } catch(Throwable $e) { /* already */ }
 
 
-/* ---------- PUBLIC API (No changes needed here) ---------- */
-if (isset($_GET['ajax']) && in_array($_GET['ajax'], ['meta','majors_by_faculty'], true)) {
+/* ---------- PUBLIC API (No changes needed here) ----------
+   ✅ เพิ่ม programs_by_major และ groups_by_program
+   ✅ คง meta และ majors_by_faculty ไว้เหมือนเดิม */
+if (isset($_GET['ajax']) && in_array($_GET['ajax'], ['meta','majors_by_faculty','programs_by_major','groups_by_program'], true)) {
   header('Content-Type: application/json; charset=utf-8');
+
   $getOpts = function(PDO $pdo, $type, $parent=null){
     $sql = "SELECT id AS value, label FROM form_options WHERE type=?";
     $params = [$type];
@@ -87,24 +90,38 @@ if (isset($_GET['ajax']) && in_array($_GET['ajax'], ['meta','majors_by_faculty']
     return $st->fetchAll(PDO::FETCH_ASSOC);
   };
 
-    if ($_GET['ajax']==='majors_by_faculty') {
-        $fac = $_GET['faculty'] ?? '';
-        echo json_encode(['majors'=>$getOpts($pdo,'major',$fac)], JSON_UNESCAPED_UNICODE); exit;
-    }
-    
-        echo json_encode([
-        'faculties' => $getOpts($pdo,'faculty'),
-        'levels'    => $getOpts($pdo,'education_level'),
-        'ptypes'    => $getOpts($pdo,'program_type'),
-        'curnames'  => $getOpts($pdo,'curriculum_name'),
-        'curyears'  => $getOpts($pdo,'curriculum_year'),
-        'groups'    => $getOpts($pdo,'student_group'),
-        'statuses'  => $getOpts($pdo,'student_status'),
-        'student_status' => $getOpts($pdo,'student_status'), // <-- เพิ่มบรรทัดนี้ถ้าฟรอนต์ใช้คีย์นี้
-        'terms'     => $getOpts($pdo,'education_term'),
-        ], JSON_UNESCAPED_UNICODE);
-        exit;
-    }
+  // --- branch: majors
+  if ($_GET['ajax']==='majors_by_faculty') {
+    $fac = $_GET['faculty'] ?? '';
+    echo json_encode(['majors'=>$getOpts($pdo,'major',$fac)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // --- ✅ branch: programs
+  if ($_GET['ajax']==='programs_by_major') {
+    $maj = $_GET['major'] ?? '';
+    echo json_encode(['programs'=>$getOpts($pdo,'program',$maj)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // --- ✅ branch: groups (student_group)
+  if ($_GET['ajax']==='groups_by_program') {
+    $prog = $_GET['program'] ?? '';
+    echo json_encode(['groups'=>$getOpts($pdo,'student_group',$prog)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // --- default: meta (คงโครงสร้างเดิม)
+  echo json_encode([
+    'faculties' => $getOpts($pdo,'faculty'),
+    'levels'    => $getOpts($pdo,'education_level'),
+    'ptypes'    => $getOpts($pdo,'program_type'),
+    'curnames'  => $getOpts($pdo,'curriculum_name'),
+    'curyears'  => $getOpts($pdo,'curriculum_year'),
+    'groups'    => $getOpts($pdo,'student_group'),
+    'statuses'  => $getOpts($pdo,'student_status'),
+    'student_status' => $getOpts($pdo,'student_status'), // <-- เดิมมีอยู่แล้ว คงไว้
+    'terms'     => $getOpts($pdo,'education_term'),
+  ], JSON_UNESCAPED_UNICODE);
+  exit;
+}
 
 /* ===== Utils / Auth (No changes needed here) ===== */
 function e($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
@@ -278,7 +295,8 @@ if ($view === 'courses') {
       if ($code==='' || $name==='') { flash('danger','กรอก “รหัสวิชา” และ “ชื่อวิชา”'); }
       else {
         try{
-            $st = $pdo->prepare("UPDATE coursesSET course_code=?, course_name=?, credits=?, faculty_value=?, major_value=?, program_value=?, curriculum_name_value=?, curriculum_year_value=?WHERE id=?");
+            /* ✅ แก้คำสั่งให้ถูกต้อง: เพิ่มช่องว่างหลัง courses และก่อน WHERE */
+            $st = $pdo->prepare("UPDATE courses SET course_code=?, course_name=?, credits=?, faculty_value=?, major_value=?, program_value=?, curriculum_name_value=?, curriculum_year_value=? WHERE id=?");
             $st->execute([$code,$name,$credits,$faculty,$major,$program,$curName,$curYear,$id]);
             flash('ok','แก้ไขรายวิชาเรียบร้อย');
         } catch(Throwable $e){ flash('danger','ดำเนินการไม่สำเร็จ: '.$e->getMessage()); }
@@ -297,7 +315,7 @@ if ($view === 'courses') {
   $majors    = $optByType['major'] ?? [];
   $programs  = $optByType['program'] ?? [];
   $curNames  = $optByType['curriculum_name'] ?? [];
-$curYears  = $optByType['curriculum_year'] ?? [];
+  $curYears  = $optByType['curriculum_year'] ?? [];
 
   $q = trim($_GET['q'] ?? '');
   $params=[]; $where='';
@@ -397,7 +415,8 @@ if ($view === 'options') {
 
     if ($act==='add_opt'){ // hierarchical additions
       $type = trim($_POST['opt_type'] ?? '');
-      $label = trim($_POST['opt_label'] ?? '');
+      $label = trim($_POST['opt_label]'] ?? $_POST['opt_label'] ?? ''); // คงเดิม + เผื่อ key ผิดพิมพ์
+      if ($label==='') { $label = trim($_POST['opt_label'] ?? ''); }
       $parent = trim($_POST['opt_parent'] ?? '') ?: null;
       if ($type===''||$label===''){ flash('danger','กรอกข้อมูลให้ครบ'); }
       else {
@@ -432,7 +451,7 @@ if ($view === 'options') {
   $opts_types = [
     'faculty' => 'คณะ', 'major' => 'สาขา', 'program' => 'สาขาวิชา', 'student_group' => 'กลุ่มนักศึกษา',
     'education_level' => 'ระดับการศึกษา', 'program_type' => 'ประเภทหลักสูตร', 'curriculum_name' => 'หลักสูตร',
-    'curriculum_year' => 'ปีของหลักสูตร', 'student_status'  => 'สถานะ', 'education_term' => 'ภาคการศึกษา', 'education_year' => 'ปีการศึกษา',
+    'curriculum_year' => 'ปีของหลักสูตร', 'education_term' => 'ภาคการศึกษา', 'education_year' => 'ปีการศึกษา',
   ];
   $all_opts = $pdo->query("SELECT * FROM form_options ORDER BY type, parent_value, label")->fetchAll(PDO::FETCH_ASSOC);
   $grouped_opts = [];
@@ -751,7 +770,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
                 <?php $i = 1; foreach($options as $o): ?>
                 <tr>
                   <td style="text-align:center; font-weight: 600; color: var(--muted)"><?php echo $i++; ?>.</td>
-                  <td style="font-weight:600"><?php echo e($o['label']); ?><span style="font-family:monospace; font-size:11px;">ID: <?php echo e($o['id']); ?></span></td>
+                  <td style="font-weight:600"><?php echo e($o['label']); ?><span style="font-family:monospace; font-size:11px;"></span></td>
                   <?php if (in_array($type, ['major', 'program', 'student_group'])): ?>
                   <td>
                     <?php if($o['parent_value']): $parent_label = $value_to_label_map[$o['parent_value']] ?? $o['parent_value']; ?>
