@@ -1,4 +1,4 @@
-<?php
+<?php 
 // teacher.php — Dashboard อาจารย์ + เปลี่ยนรหัสผ่าน + โปรไฟล์อาจารย์ + กลุ่ม/นักศึกษา + quiz + education_info
 session_start();
 
@@ -114,10 +114,10 @@ function studentNameExpr(mysqli $conn): string {
     return "COALESCE(".implode(', ',$parts).", CAST(s.student_id AS CHAR))";
 }
 function studentCodeExpr(mysqli $conn): string {
-    if (colExists($conn,'students','student_code')) return "s.student_code";
-    if (colExists($conn,'students','code')) return "s.code";
-    return "CAST(s.student_id AS CHAR)";
+    // ใช้ student_id เป็น code หลัก
+    return "s.student_id";
 }
+
 
 // ====== โปรไฟล์อาจารย์ ======
 $teacherProfile = ['name'=>null,'username'=>null,'email'=>null,'phone'=>null];
@@ -551,13 +551,24 @@ if ($selectedGroupId) {
     $debug_found_results  = 0;
 
     if (!empty($students)) {
-        $studentIdList = array_column($students, 'student_id');
-        $ph    = implode(',', array_fill(0, count($studentIdList), '?'));
-        $types = str_repeat('s', count($studentIdList));
-        $courseId = $groupInfo['course_id'] ?? null;
+        // เตรียมรายการ student_id และ (เผื่อ) student_code ทั้งหมดเป็น candidate key
+        $idsById   = array_map('strval', array_column($students, 'student_id'));
+        $idsByCode = array_map('strval', array_filter(array_column($students, 'student_code')));
+        $candidateIds = array_values(array_unique(array_merge($idsById, $idsByCode)));
 
-        // === 1) quiz_attempts (ถ้ามี)
-        if ($hasAttempts) {
+        // แผนที่ชื่อ quiz (ถ้ามีตาราง quizzes)
+        $quizTitleMap = [];
+        if ($hasQuizzes) {
+            if ($st = $conn->prepare("SELECT quiz_id, COALESCE(title, CONCAT('Quiz#',quiz_id)) AS title FROM quizzes")) {
+                $st->execute();
+                $rr = get_stmt_rows($st);
+                foreach ($rr as $r) $quizTitleMap[$r['quiz_id']] = $r['title'];
+                $st->close();
+            }
+        }
+
+        // === 1) quiz_attempts (ถ้ามี) — ดึงแถวล่าสุดต่อ (student_id, quiz_id)
+        if ($hasAttempts && !empty($candidateIds)) {
             $attemptTimeCol = null;
             foreach (['submitted_at','created_at','updated_at','finish_time','end_time'] as $cand) {
                 if (colExists($conn,'quiz_attempts',$cand)) { $attemptTimeCol = $cand; break; }
@@ -566,64 +577,34 @@ if ($selectedGroupId) {
                 $attemptTimeCol = colExists($conn,'quiz_attempts','id') ? 'id' : null;
             }
 
-            $quizTitleMap = [];
-            if ($hasQuizzes) {
-                $qsql = "SELECT quiz_id, COALESCE(title, CONCAT('Quiz#',quiz_id)) AS title FROM quizzes";
-                $needCourseFilterInQuizzes = colExists($conn,'quizzes','course_id') && !empty($courseId);
-                if ($needCourseFilterInQuizzes) $qsql .= " WHERE course_id = ?";
-                $st = $conn->prepare($qsql);
-                if ($st) {
-                    if ($needCourseFilterInQuizzes) $st->bind_param('s', $courseId);
-                    $st->execute();
-                    $rr = get_stmt_rows($st);
-                    foreach ($rr as $r) $quizTitleMap[$r['quiz_id']] = $r['title'];
-                    $st->close();
-                }
-            }
-
             if ($attemptTimeCol !== null) {
-                $attemptHasCourse = colExists($conn,'quiz_attempts','course_id');
-                $innerWhere = "student_id IN ($ph)";
-                $outerWhere = "a.student_id IN ($ph)";
-                $bindTypesAttempts = $types;
-                $bindParamsInner   = $studentIdList;
-                $bindParamsOuter   = $studentIdList;
-
-                if ($attemptHasCourse && !empty($courseId)) {
-                    $innerWhere .= " AND course_id = ?";
-                    $outerWhere .= " AND a.course_id = ?";
-                    $bindTypesAttempts .= 's';
-                    $bindParamsInner[] = $courseId;
-                    $bindParamsOuter[] = $courseId;
-                }
-
+                $ph    = implode(',', array_fill(0, count($candidateIds), '?'));
+                $types = str_repeat('s', count($candidateIds));
                 $sqlA = "
-                    SELECT a.student_id, a.quiz_id, a.score,
+                    SELECT a.student_id, a.quiz_id,
+                           ".(colExists($conn,'quiz_attempts','score')  ? "a.score"  : "NULL AS score").",
                            ".(colExists($conn,'quiz_attempts','status') ? "a.status" : "NULL AS status").",
                            a.`{$attemptTimeCol}` AS tstamp
                     FROM quiz_attempts a
                     INNER JOIN (
                         SELECT student_id, quiz_id, MAX(`{$attemptTimeCol}`) AS last_time
                         FROM quiz_attempts
-                        WHERE {$innerWhere}
+                        WHERE CAST(student_id AS CHAR) IN ($ph)
                         GROUP BY student_id, quiz_id
                     ) t
                     ON a.student_id = t.student_id
-                       AND a.quiz_id = t.quiz_id
+                       AND a.quiz_id  = t.quiz_id
                        AND a.`{$attemptTimeCol}` = t.last_time
-                    WHERE {$outerWhere}
+                    WHERE CAST(a.student_id AS CHAR) IN ($ph)
                     ORDER BY a.student_id, a.quiz_id
                 ";
-
                 if ($st = $conn->prepare($sqlA)) {
-                    $allTypes = $bindTypesAttempts . $bindTypesAttempts;
-                    $allParams = array_merge($bindParamsInner, $bindParamsOuter);
-                    $st->bind_param($allTypes, ...$allParams);
+                    $st->bind_param($types.$types, ...array_merge($candidateIds,$candidateIds));
                     $st->execute();
                     $rowsA = get_stmt_rows($st);
                     $debug_found_attempts = count($rowsA);
                     foreach ($rowsA as $a) {
-                        $sid = $a['student_id'];
+                        $sid = (string)$a['student_id'];
                         if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
                         $title = $quizTitleMap[$a['quiz_id']] ?? ('Quiz#'.$a['quiz_id']);
                         $quizStats[$sid][] = [
@@ -636,13 +617,14 @@ if ($selectedGroupId) {
                     }
                     $st->close();
                 } else {
-                    error_log("Failed to prepare attempts query: ".$conn->error);
+                    error_log("Failed to prepare quiz_attempts query: ".$conn->error);
                 }
             }
         }
 
         // === 2) quiz_results (fallback/เสริม) — ไม่กรองด้วย course_id และ cast student_id เป็น CHAR กันชนิดไม่ตรง
-        if ($hasQResults) {
+        $processedRowsR = false; // กันเติมซ้ำกับบล็อคด้านล่าง
+        if ($hasQResults && !empty($candidateIds)) {
             $resTimeCol = null;
             foreach (['submitted_at','created_at','updated_at','finish_time','end_time'] as $cand) {
                 if (colExists($conn,'quiz_results',$cand)) { $resTimeCol = $cand; break; }
@@ -651,18 +633,10 @@ if ($selectedGroupId) {
                 $resTimeCol = colExists($conn,'quiz_results','id') ? 'id' : null;
             }
 
-            if ($hasQuizzes && empty($quizTitleMap)) {
-                $quizTitleMap = [];
-                $qsql = "SELECT quiz_id, COALESCE(title, CONCAT('Quiz#',quiz_id)) AS title FROM quizzes";
-                if ($st = $conn->prepare($qsql)) {
-                    $st->execute();
-                    $rr = get_stmt_rows($st);
-                    foreach ($rr as $r) $quizTitleMap[$r['quiz_id']] = $r['title'];
-                    $st->close();
-                }
-            }
-
             if ($resTimeCol !== null) {
+                $ph    = implode(',', array_fill(0, count($candidateIds), '?'));
+                $types = str_repeat('s', count($candidateIds));
+
                 $sqlR = "
                     SELECT r.student_id, r.quiz_id,
                            ".(colExists($conn,'quiz_results','score') ? "r.score" : "NULL AS score").",
@@ -671,20 +645,22 @@ if ($selectedGroupId) {
                     INNER JOIN (
                         SELECT student_id, quiz_id, MAX(`{$resTimeCol}`) AS last_time
                         FROM quiz_results
-                        WHERE CAST(student_id AS CHAR) IN ({$ph})
+                        WHERE CAST(student_id AS CHAR) IN ($ph)
                         GROUP BY student_id, quiz_id
                     ) t
                     ON r.student_id = t.student_id
-                       AND r.quiz_id = t.quiz_id
+                       AND r.quiz_id  = t.quiz_id
                        AND r.`{$resTimeCol}` = t.last_time
-                    WHERE CAST(r.student_id AS CHAR) IN ({$ph})
+                    WHERE CAST(r.student_id AS CHAR) IN ($ph)
                     ORDER BY r.student_id, r.quiz_id
                 ";
                 if ($st = $conn->prepare($sqlR)) {
-                    $st->bind_param($types.$types, ...array_merge($studentIdList, $studentIdList));
+                    $st->bind_param($types.$types, ...array_merge($candidateIds,$candidateIds));
                     $st->execute();
                     $rowsR = get_stmt_rows($st);
                     $debug_found_results = count($rowsR);
+
+                    // ✅ แก้ index ผิด และเติมผลให้ครบในบล็อคนี้เลย
                     foreach ($rowsR as $a) {
                         $sid = (string)$a['student_id'];
                         if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
@@ -697,13 +673,31 @@ if ($selectedGroupId) {
                             'time'       => $a['tstamp'],
                         ];
                     }
+                    $processedRowsR = true; // กันเติมซ้ำ
                     $st->close();
                 } else {
-                    error_log("Failed to prepare results query: ".$conn->error);
+                    error_log("Failed to prepare quiz_results query: ".$conn->error);
                 }
             }
         }
 
+        // เดิมมีบล็อคเติมผล rowsR ซ้ำ — คงไว้ แต่กันไม่ให้รันทับด้วย flag
+        if (!$processedRowsR && isset($rowsR) && is_array($rowsR)) {
+            foreach ($rowsR as $a) {
+                $sid = (string)$a['student_id'];
+                if (!isset($quizStats[$sid])) $quizStats[$sid] = [];
+                $title = $quizTitleMap[$a['quiz_id']] ?? ('Quiz#'.$a['quiz_id']);
+                $quizStats[$sid][] = [
+                    'quiz_id'    => $a['quiz_id'],
+                    'quiz_title' => $title,
+                    'score'      => $a['score'],
+                    'status'     => null,
+                    'time'       => $a['tstamp'],
+                ];
+            }
+        }
+
+        // เก็บโน้ตดีบัก (ถ้าคุณใช้แสดงบนหน้า)
         if (!empty($selectedGroupId)) {
             $sourceNote .= ($sourceNote ? ' | ' : '') .
                            "quiz_attempts={$debug_found_attempts}, quiz_results={$debug_found_results}";

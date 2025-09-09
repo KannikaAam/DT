@@ -1,4 +1,4 @@
-<?php
+<?php 
 session_start();
 
 /* ====================== DB CONNECT ====================== */
@@ -11,6 +11,12 @@ $conn = new mysqli($host, $username, $password, $database);
 if ($conn->connect_error) { die("การเชื่อมต่อล้มเหลว: " . $conn->connect_error); }
 $conn->set_charset('utf8mb4');
 $conn->query("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
+
+/* ===== Flash message จาก quiz.php ===== */
+$flash_error = $_SESSION['flash_error'] ?? '';
+unset($_SESSION['flash_error']);
+$flash_success = $_SESSION['flash_success'] ?? '';
+unset($_SESSION['flash_success']);
 
 /* =========================================================
    ส่วนที่ 1: ตรวจสอบและจัดการ AJAX Request (API สำหรับ dropdown)
@@ -103,10 +109,7 @@ if ($result && $result->num_rows == 1) {
     $student_data = $result->fetch_assoc();
     $data_found = true;
 
-    /* ===== แปลงค่า field → label โดยอาศัย form_options (ไม่มีคอลัมน์ value แล้ว) =====
-       - ถ้า field เป็นตัวเลข: มองว่าเป็น id ใน form_options
-       - ถ้าเป็นข้อความ: ใช้เทียบกับ label (รองรับกรณีเก็บเป็นข้อความอยู่แล้ว)
-    */
+    /* ===== แปลงค่า field → label โดยอาศัย form_options ===== */
     $optionTypes = [
         'faculty'         => 'faculty',
         'major'           => 'major',
@@ -133,7 +136,6 @@ if ($result && $result->num_rows == 1) {
             $id = (int)$val;
             $opt->bind_param('sis', $type, $id, $val);
         } else {
-            // ถ้าไม่ใช่ตัวเลข ให้ใส่ id=0 แล้วจับคู่ด้วย label
             $id = 0;
             $opt->bind_param('sis', $type, $id, $val);
         }
@@ -141,7 +143,7 @@ if ($result && $result->num_rows == 1) {
         $opt->execute();
         $res = $opt->get_result();
         if ($row = $res->fetch_assoc()) {
-            $student_data[$field] = $row['label']; // ใช้ชื่ออ่านง่าย
+            $student_data[$field] = $row['label'];
         }
     }
     $opt->close();
@@ -149,7 +151,6 @@ if ($result && $result->num_rows == 1) {
     $full_name = $student_data['full_name'] ?? 'ไม่ระบุชื่อ';
 
 } else {
-    // ไม่พบข้อมูล
     $full_name = 'ไม่พบข้อมูล';
     $student_data = array_fill_keys([
         'full_name', 'birthdate', 'gender', 'citizen_id', 'address', 'phone', 'email',
@@ -208,14 +209,19 @@ body{background:#f5f7fa;color:var(--text);line-height:1.6}
 .info-label{width:180px;font-weight:bold}
 .info-value{flex:1}
 .info-value.empty{color:#999;font-style:italic}
-.section-title{font-size:18px;color:var(--secondary);margin:20px 0 15px;padding-bottom:8px;border-bottom:2px solid var(--primary);display:flex;align-items:center;gap:10px}
+.section-title{font-size:18px;color:#2980b9;margin:20px 0 15px;padding-bottom:8px;border-bottom:2px solid #3498db;display:flex;align-items:center;gap:10px}
 .icon{width:20px;height:20px;display:inline-block}
 .action-buttons{display:flex;gap:15px;margin:20px 0;flex-wrap:wrap}
 .btn{padding:12px 20px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;color:#374151;text-decoration:none;display:inline-flex;gap:8px}
 .btn-success{border-left:3px solid #10b981}
 .btn-warning{border-left:3px solid #f59e0b}
 .btn-info{border-left:3px solid #8b5cf6}
-@media (max-width:768px){.student-profile{grid-template-columns:1fr}.profile-image img{width:120px;height:120px}.navbar{flex-direction:column;gap:8px}}
+
+@media (max-width:768px){
+  .student-profile{grid-template-columns:1fr}
+  .profile-image img{width:120px;height:120px}
+  .navbar{flex-direction:column;gap:8px}
+}
 </style>
 </head>
 <body>
@@ -232,6 +238,14 @@ body{background:#f5f7fa;color:var(--text);line-height:1.6}
 
     <div class="container">
         <h1>หน้าหลักนักศึกษา</h1>
+
+        <!-- Flash จาก quiz.php -->
+        <?php if (!empty($flash_success)): ?>
+          <div class="alert alert-success"><strong>สำเร็จ:</strong> <?= htmlspecialchars($flash_success) ?></div>
+        <?php endif; ?>
+        <?php if (!empty($flash_error)): ?>
+          <div class="alert alert-warning"><strong>แจ้งเตือน:</strong> <?= htmlspecialchars($flash_error) ?></div>
+        <?php endif; ?>
 
         <div class="action-buttons">
             <a href="edit_profile.php" class="btn btn-success"><span class="icon">✏️</span>แก้ไขข้อมูลส่วนตัว</a>
@@ -273,10 +287,8 @@ body{background:#f5f7fa;color:var(--text);line-height:1.6}
                     display_info('ที่อยู่', $student_data['address']);
                     display_info('เบอร์โทรศัพท์', $student_data['phone']);
                     display_info('อีเมล์', $student_data['email']);
-                    ?>
 
-                    <h2 class="section-title"><span class="icon">📚</span>ข้อมูลการศึกษา</h2>
-                    <?php
+                    echo "<h2 class='section-title'><span class='icon'>📚</span>ข้อมูลการศึกษา</h2>";
                     display_info('คณะ', $student_data['faculty']);
                     display_info('สาขา', $student_data['major']);
                     display_info('สาขาวิชา', $student_data['program']);
@@ -297,8 +309,7 @@ body{background:#f5f7fa;color:var(--text);line-height:1.6}
 
 <script>
 /* =========================================================
-   สคริปต์เติม dropdown (ใช้ในหน้าที่มีฟอร์ม เช่น edit_profile.php)
-   หน้านี้ไม่มี element เหล่านี้ แต่เก็บไว้เพื่อ copy ไปใช้ได้ทันที
+   สคริปต์เติม dropdown (คงเดิม)
    ========================================================= */
 const OPTIONS_API = <?= json_encode($OPTIONS_API) ?>;
 
@@ -318,7 +329,6 @@ async function fetchJSON(url){
 }
 
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // ถ้าไม่มี element ต่อไปนี้ แสดงว่าไม่ใช่หน้าแบบฟอร์ม → ไม่ทำงานต่อ
   const $faculty   = document.getElementById('faculty');
   const $major     = document.getElementById('major');
   const $level     = document.getElementById('education_level');

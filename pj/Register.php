@@ -1,5 +1,6 @@
 <?php
-// register.php — ฟอร์มลงทะเบียนนักศึกษา (รวมโค้ดเดิม และแก้ให้ดึงข้อมูล dropdown ได้จริง)
+// register.php — ฟอร์มลงทะเบียนนักศึกษา (มินิมอล + กรองตัวเลข + ยืนยันรหัสผ่าน)
+// เวอร์ชันนี้เอา "สถานะ" ออกจากฟอร์มและ JS ทั้งหมด แต่ยังตั้งค่าเริ่มต้นเป็น "กำลังศึกษา" ตอน INSERT
 require __DIR__ . '/db_connect.php';
 
 /* สำหรับ JS ให้รู้ว่า endpoint ไหนคือ OPTIONS API */
@@ -30,39 +31,44 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $curriculum_year = trim($_POST['curriculum_year'] ?? '');
         $student_group   = trim($_POST['student_group'] ?? '');
         $gpa             = isset($_POST['gpa']) && $_POST['gpa'] !== '' ? (float)$_POST['gpa'] : null;
-        $student_status  = trim($_POST['student_status'] ?? 'กำลังศึกษา');
+        $student_status  = 'กำลังศึกษา';
         $education_term  = trim($_POST['education_term'] ?? '');
         $education_year  = trim($_POST['education_year'] ?? '');
         $password        = $_POST['password'] ?? '';
+        $password_confirm= $_POST['password_confirm'] ?? '';
 
-        if (empty($full_name) || empty($student_id) || empty($password)) {
+        if ($full_name === '' || $student_id === '' || $password === '') {
             throw new Exception("กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน: ชื่อ-นามสกุล, รหัสนักศึกษา, และรหัสผ่าน");
         }
 
-        // ตรวจรหัสนักศึกษาซ้ำ
+        if ($student_id !== '' && !ctype_digit($student_id)) { throw new Exception("รหัสนักศึกษาต้องเป็นตัวเลขเท่านั้น"); }
+        if ($phone !== '') {
+            if (!ctype_digit($phone)) throw new Exception("เบอร์โทรต้องเป็นตัวเลขเท่านั้น");
+            if (strlen($phone) < 9 || strlen($phone) > 10) throw new Exception("เบอร์โทรควรมีความยาว 9-10 หลัก");
+        }
+        if ($citizen_id !== '') {
+            if (!ctype_digit($citizen_id)) throw new Exception("เลขบัตรประชาชนต้องเป็นตัวเลขเท่านั้น");
+            if (strlen($citizen_id) !== 13) throw new Exception("เลขบัตรประชาชนต้องมี 13 หลัก");
+        }
+        if ($gpa !== null && ($gpa < 0 || $gpa > 4)) { throw new Exception("กรุณากรอก GPA เป็นตัวเลขระหว่าง 0 - 4"); }
+        if ($password_confirm === '' || $password_confirm !== $password) { throw new Exception("รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน"); }
+
         $check_sql = "SELECT student_id FROM education_info WHERE student_id = ?";
         $check_stmt = $conn->prepare($check_sql);
         $check_stmt->bind_param("s", $student_id);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
-        if ($check_result->num_rows > 0) {
-            throw new Exception("รหัสนักศึกษา '$student_id' นี้มีอยู่ในระบบแล้ว");
-        }
+        if ($check_result->num_rows > 0) { throw new Exception("รหัสนักศึกษา '$student_id' นี้มีอยู่ในระบบแล้ว"); }
 
-        // เริ่ม Transaction
         $conn->begin_transaction();
 
-        // 1) personal_info
         $sql_personal = "INSERT INTO personal_info (full_name, birthdate, gender, citizen_id, address, phone, email)
                          VALUES (?, ?, ?, ?, ?, ?, ?)";
         $stmt_personal = $conn->prepare($sql_personal);
         $stmt_personal->bind_param("sssssss", $full_name, $birthdate, $gender, $citizen_id, $address, $phone, $email);
-        if (!$stmt_personal->execute()) {
-            throw new Exception("ไม่สามารถบันทึกข้อมูลส่วนตัวได้: " . $stmt_personal->error);
-        }
+        if (!$stmt_personal->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลส่วนตัวได้: " . $stmt_personal->error); }
         $personal_id = $conn->insert_id;
 
-        // 2) education_info
         $sql_education = "INSERT INTO education_info (
             personal_id, student_id, faculty, major, program, education_level,
             curriculum_name, program_type, curriculum_year, student_group,
@@ -71,33 +77,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $stmt_education = $conn->prepare($sql_education);
         $stmt_education->bind_param(
             "isssssssssdsss",
-            $personal_id,
-            $student_id,
-            $faculty,
-            $major,
-            $program,
-            $education_level,
-            $curriculum_name,
-            $program_type,
-            $curriculum_year,
-            $student_group,
-            $gpa,
-            $student_status,
-            $education_term,
-            $education_year
+            $personal_id, $student_id, $faculty, $major, $program, $education_level,
+            $curriculum_name, $program_type, $curriculum_year, $student_group,
+            $gpa, $student_status, $education_term, $education_year
         );
-        if (!$stmt_education->execute()) {
-            throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error);
-        }
+        if (!$stmt_education->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error); }
 
-        // 3) user_login
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
         $sql_login = "INSERT INTO user_login (student_id, password) VALUES (?, ?)";
         $stmt_login = $conn->prepare($sql_login);
         $stmt_login->bind_param("ss", $student_id, $hashed_password);
-        if (!$stmt_login->execute()) {
-            throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error);
-        }
+        if (!$stmt_login->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error); }
 
         $conn->commit();
         $success_message = "ลงทะเบียนสำเร็จ! ยินดีต้อนรับคุณ " . htmlspecialchars($full_name);
@@ -109,14 +99,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 }
 ?>
 <!DOCTYPE html>
-<html lang="th">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ลงทะเบียนนักศึกษา</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;700&display=swap" rel="stylesheet">
+  <html lang="th">
+  <head>
+  <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>ลงทะเบียนนักศึกษา</title>
+          <link rel="preconnect" href="https://fonts.googleapis.com">
+          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+          <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;700&display=swap" rel="stylesheet">
+          <link rel="stylesheet" href="https://cdn-uicons.flaticon.com/uicons-regular-rounded/css/uicons-regular-rounded.css">
 <style>
 :root {
   --primary-color:#007bff; --primary-hover:#0056b3; --secondary-color:#6c757d;
@@ -147,7 +138,10 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
 .btn-secondary{background:#f8f9fa;color:var(--text-primary);border:1px solid var(--border-color)}
 .btn-secondary:hover{background:#e9ecef}
 .form-actions{display:flex;justify-content:flex-end;gap:1rem;margin-top:2.5rem;padding-top:1.5rem;border-top:1px solid #e9ecef}
-.password-toggle{position:absolute;top:70%;right:1rem;transform:translateY(-50%);cursor:pointer;color:var(--text-secondary)}
+.password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666; }
+.password-toggle:hover { color: #000; }
+.hint{font-size:.9rem;color:var(--text-secondary);margin-top:.25rem}
+
 @media (max-width:768px){
   body{padding:1rem .5rem}
   .form-container,.header{padding:1.5rem}
@@ -172,18 +166,43 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
     <?php endif; ?>
 
     <?php if (empty($success_message)): ?>
-    <form method="POST" action="">
+    <form method="POST" action="" id="regForm" novalidate>
       <h2 class="section-title">ข้อมูลส่วนตัว</h2>
-      <div class="form-group"><label for="full_name">ชื่อ-นามสกุล *</label><input type="text" id="full_name" name="full_name" class="form-control" required placeholder="เช่น นายสมชาย ใจดี"></div>
-      <div class="form-row">
-        <div class="form-group"><label for="birthdate">วันเดือนปีเกิด</label><input type="date" id="birthdate" name="birthdate" class="form-control"></div>
-        <div class="form-group"><label for="gender">เพศ</label><select id="gender" name="gender" class="form-control"><option value="">-- เลือกเพศ --</option><option value="ชาย">ชาย</option><option value="หญิง">หญิง</option></select></div>
+      <div class="form-group">
+        <label for="full_name">ชื่อ-นามสกุล *</label>
+        <input type="text" id="full_name" name="full_name" class="form-control" required placeholder="เช่น นายสมชาย ใจดี">
       </div>
-      <div class="form-group"><label for="citizen_id">เลขบัตรประชาชน</label><input type="text" id="citizen_id" name="citizen_id" class="form-control" maxlength="13" pattern="\d{13}" placeholder="เลข 13 หลัก ไม่ต้องมีขีด"></div>
-      <div class="form-group"><label for="address">ที่อยู่ปัจจุบัน</label><textarea id="address" name="address" class="form-control" rows="3" placeholder="บ้านเลขที่, ถนน, ตำบล, อำเภอ, จังหวัด, รหัสไปรษณีย์"></textarea></div>
       <div class="form-row">
-        <div class="form-group"><label for="phone">เบอร์โทรศัพท์</label><input type="tel" id="phone" name="phone" class="form-control" placeholder="เช่น 0812345678"></div>
-        <div class="form-group"><label for="email">อีเมล</label><input type="email" id="email" name="email" class="form-control" placeholder="เช่น example@email.com"></div>
+        <div class="form-group">
+          <label for="birthdate">วันเดือนปีเกิด</label>
+          <input type="date" id="birthdate" name="birthdate" class="form-control">
+        </div>
+        <div class="form-group">
+          <label for="gender">เพศ</label>
+          <select id="gender" name="gender" class="form-control">
+            <option value="">-- เลือกเพศ --</option>
+            <option value="ชาย">ชาย</option>
+            <option value="หญิง">หญิง</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="citizen_id">เลขบัตรประชาชน</label>
+        <input type="text" id="citizen_id" name="citizen_id" class="form-control" maxlength="13" pattern="\d{13}" inputmode="numeric" autocomplete="off" placeholder="เลข 13 หลัก ไม่ต้องมีขีด">
+      </div>
+      <div class="form-group">
+        <label for="address">ที่อยู่ปัจจุบัน</label>
+        <textarea id="address" name="address" class="form-control" rows="3" placeholder="บ้านเลขที่, ถนน, ตำบล, อำเภอ, จังหวัด, รหัสไปรษณีย์"></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="phone">เบอร์โทรศัพท์</label>
+          <input type="text" id="phone" name="phone" class="form-control" inputmode="numeric" pattern="\d{9,10}" maxlength="10" autocomplete="off" placeholder="เช่น 0812345678">
+        </div>
+        <div class="form-group">
+          <label for="email">อีเมล</label>
+          <input type="email" id="email" name="email" class="form-control" placeholder="เช่น example@email.com">
+        </div>
       </div>
 
       <h2 class="section-title">ข้อมูลการศึกษา</h2>
@@ -194,7 +213,10 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
       </div>
       <div class="form-row">
         <div class="form-group"><label for="education_level">ระดับการศึกษา</label><select id="education_level" name="education_level" class="form-control"></select></div>
-        <div class="form-group"><label for="student_id">รหัสนักศึกษา *</label><input type="text" id="student_id" name="student_id" class="form-control" required placeholder="กรอกรหัสนักศึกษา"></div>
+        <div class="form-group">
+          <label for="student_id">รหัสนักศึกษา *</label>
+          <input type="text" id="student_id" name="student_id" class="form-control" required inputmode="numeric" pattern="\d+" maxlength="15" autocomplete="off" placeholder="กรอกรหัสนักศึกษา (ตัวเลขเท่านั้น)">
+        </div>
       </div>
       <div class="form-row">
         <div class="form-group"><label for="curriculum_name">หลักสูตร</label><select id="curriculum_name" name="curriculum_name" class="form-control"></select></div>
@@ -206,9 +228,6 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
       </div>
       <div class="form-row">
         <div class="form-group"><label for="gpa">เกรดเฉลี่ยสะสม (GPA)</label><input type="number" step="0.01" min="0" max="4" id="gpa" name="gpa" class="form-control" placeholder="ถ้ามี"></div>
-        <div class="form-group"><label for="student_status">สถานะ</label><select id="student_status" name="student_status" class="form-control"></select></div>
-      </div>
-      <div class="form-row">
         <div class="form-group"><label for="education_term">ภาคการศึกษาแรกเข้า</label><select id="education_term" name="education_term" class="form-control"></select></div>
         <div class="form-group"><label for="education_year">ปีการศึกษาแรกเข้า (พ.ศ.)</label>
           <input type="number" id="education_year" name="education_year" class="form-control" min="2550" max="<?php echo (int)date('Y') + 544; ?>" placeholder="เช่น 2567">
@@ -219,14 +238,23 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
       <div class="form-group">
         <label for="password">ตั้งรหัสผ่าน *</label>
         <div style="position: relative;">
-            <input type="password" id="password" name="password" class="form-control" required>
-            <span class="password-toggle" onclick="togglePasswordVisibility()">👁️</span>
+            <input type="password" id="password" name="password" class="form-control" required minlength="8" autocomplete="new-password">
+            <span class="password-toggle" onclick="togglePasswordVisibility('password', this)"><i class="fi fi-rr-eye"></i></span>
         </div>
+        <div class="hint">อย่างน้อย 8 ตัวอักษร แนะนำผสม A-Z, a-z, 0-9</div>
+      </div>
+      <div class="form-group">
+        <label for="password_confirm">ยืนยันรหัสผ่าน *</label>
+        <div style="position: relative;">
+            <input type="password" id="password_confirm" name="password_confirm" class="form-control" required autocomplete="new-password">
+            <span class="password-toggle" onclick="togglePasswordVisibility('password_confirm', this)"><i class="fi fi-rr-eye"></i></span>
+        </div>
+        <div id="pwMatchHint" class="hint"></div>
       </div>
 
       <div class="form-actions">
-        <a href="login.php" class="btn btn-secondary">กลับหน้าเข้าสู่ระบบ</a>
-        <button type="submit" id="submitBtn" class="btn btn-primary">✔️ ลงทะเบียน</button>
+        <a href="login.php" class="btn btn-secondary">ยกเลิก</a>
+        <button type="submit" id="submitBtn" class="btn btn-primary">ลงทะเบียน</button>
       </div>
     </form>
     <?php endif; ?>
@@ -240,9 +268,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   const majorEl = document.getElementById('major');
   const programEl = document.getElementById('program');
   const groupEl = document.getElementById('student_group');
-  const endpoint = '<?= $OPTIONS_API ?>'; // ✅ ใช้ค่าจาก PHP ให้ตรงไฟล์จริง
+  const endpoint = '<?php echo $OPTIONS_API; ?>';
 
-  // fill() รองรับทั้ง {id,label} / {value,label} / string
+  const onlyDigits = (el, maxLen = null) => {
+    el.addEventListener('input', () => {
+      const digits = el.value.replace(/\D+/g, '');
+      el.value = maxLen ? digits.slice(0, maxLen) : digits;
+    });
+  };
+  onlyDigits(document.getElementById('citizen_id'), 13);
+  onlyDigits(document.getElementById('phone'), 10);
+  onlyDigits(document.getElementById('student_id'));
+
+  const pw = document.getElementById('password');
+  const pw2 = document.getElementById('password_confirm');
+  const pwHint = document.getElementById('pwMatchHint');
+  function checkPwMatch(){
+    if (!pw.value && !pw2.value) { pwHint.textContent = ''; return; }
+    if (pw.value.length < 8) { pwHint.textContent = 'รหัสผ่านควรยาวอย่างน้อย 8 ตัวอักษร'; return; }
+    if (pw.value !== pw2.value) { pwHint.textContent = 'รหัสผ่านไม่ตรงกัน'; }
+    else { pwHint.textContent = 'รหัสผ่านตรงกัน ✔️'; }
+  }
+  pw.addEventListener('input', checkPwMatch);
+  pw2.addEventListener('input', checkPwMatch);
+
   const fill = (element, list, withBlank = true, blankText = '-- เลือก --') => {
     if (!element) return;
     element.innerHTML = '';
@@ -255,60 +304,62 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
 
   const loadGroups = async (programValue) => {
-    groupEl.disabled = true;
-    fill(groupEl, [], true, programValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาวิชาก่อน --');
+    const el = document.getElementById('student_group');
+    el.disabled = true;
+    fill(el, [], true, programValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาวิชาก่อน --');
     if (!programValue) return;
     try {
       const res = await fetch(`${endpoint}?ajax=groups_by_program&program=${encodeURIComponent(programValue)}`);
       if (!res.ok) throw new Error(`โหลด groups ล้มเหลว (${res.status})`);
       const data = await res.json();
-      fill(groupEl, data.groups, true, '-- เลือกกลุ่มเรียน --');
-      groupEl.disabled = false;
-    } catch (e) { console.error('Failed to load groups:', e); fill(groupEl, [], true, ' โหลดผิดพลาด'); }
+      fill(el, data.groups, true, '-- เลือกกลุ่มเรียน --');
+      el.disabled = false;
+    } catch (e) { console.error('Failed to load groups:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
   };
 
   const loadPrograms = async (majorValue) => {
-    programEl.disabled = true;
-    fill(programEl, [], true, majorValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาก่อน --');
+    const el = document.getElementById('program');
+    el.disabled = true;
+    fill(el, [], true, majorValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาก่อน --');
     await loadGroups('');
     if (!majorValue) return;
     try {
       const res = await fetch(`${endpoint}?ajax=programs_by_major&major=${encodeURIComponent(majorValue)}`);
       if (!res.ok) throw new Error(`โหลด programs ล้มเหลว (${res.status})`);
       const data = await res.json();
-      fill(programEl, data.programs, true, '-- เลือกสาขาวิชา --');
-      programEl.disabled = false;
-    } catch (e) { console.error('Failed to load programs:', e); fill(programEl, [], true, ' โหลดผิดพลาด'); }
+      fill(el, data.programs, true, '-- เลือกสาขาวิชา --');
+      el.disabled = false;
+    } catch (e) { console.error('Failed to load programs:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
   };
 
   const loadMajors = async (facultyValue) => {
-    majorEl.disabled = true;
-    fill(majorEl, [], true, facultyValue ? ' กำลังโหลด...' : '-- โปรดเลือกคณะก่อน --');
+    const el = document.getElementById('major');
+    el.disabled = true;
+    fill(el, [], true, facultyValue ? ' กำลังโหลด...' : '-- โปรดเลือกคณะก่อน --');
     await loadPrograms('');
     if (!facultyValue) return;
     try {
       const res = await fetch(`${endpoint}?ajax=majors_by_faculty&faculty=${encodeURIComponent(facultyValue)}`);
       if (!res.ok) throw new Error(`โหลด majors ล้มเหลว (${res.status})`);
       const data = await res.json();
-      fill(majorEl, data.majors, true, '-- เลือกสาขา --');
-      majorEl.disabled = false;
-    } catch (e) { console.error('Failed to load majors:', e); fill(majorEl, [], true, ' โหลดผิดพลาด'); }
+      fill(el, data.majors, true, '-- เลือกสาขา --');
+      el.disabled = false;
+    } catch (e) { console.error('Failed to load majors:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
   };
 
   const initForm = async () => {
     submitBtn.disabled = true;
+    const original = submitBtn.innerHTML;
     submitBtn.innerHTML = ' กำลังโหลดข้อมูล...';
     try {
       const res = await fetch(`${endpoint}?ajax=meta`);
       if (!res.ok) throw new Error(`ไม่สามารถโหลดข้อมูลตัวเลือกได้ (${res.status})`);
       const meta = await res.json();
-      console.log('META =>', meta);
       fill(facEl, meta.faculties);
       fill(document.getElementById('education_level'), meta.levels);
       fill(document.getElementById('program_type'), meta.ptypes);
       fill(document.getElementById('curriculum_name'), meta.curnames);
       fill(document.getElementById('curriculum_year'), meta.curyears, false);
-      fill(document.getElementById('student_status'), meta.statuses);
       fill(document.getElementById('education_term'), meta.terms);
       await loadMajors('');
     } catch (error) {
@@ -317,7 +368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     } finally {
       submitBtn.disabled = false;
-      submitBtn.innerHTML = ' ✔️ ลงทะเบียน';
+      submitBtn.innerHTML = original;
     }
   };
 
@@ -325,18 +376,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   majorEl.addEventListener('change', (e) => loadPrograms(e.target.value));
   programEl.addEventListener('change', (e) => loadGroups(e.target.value));
 
+  document.getElementById('regForm').addEventListener('submit', (ev) => {
+    if (pw.value.length < 8) { ev.preventDefault(); alert('รหัสผ่านควรยาวอย่างน้อย 8 ตัวอักษร'); return; }
+    if (pw.value !== pw2.value) { ev.preventDefault(); alert('รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน'); }
+  });
+
   await initForm();
 });
 
-function togglePasswordVisibility() {
-  const passwordInput = document.getElementById('password');
-  const toggleIcon = document.querySelector('.password-toggle');
-  if (passwordInput.type === 'password') {
-      passwordInput.type = 'text';
-      toggleIcon.textContent = '🙈';
+function togglePasswordVisibility(id, el) {
+  const input = document.getElementById(id);
+  if (input.type === "password") {
+    input.type = "text";
+    el.innerHTML = '<i class="fi fi-rr-eye-crossed"></i>';
   } else {
-      passwordInput.type = 'password';
-      toggleIcon.textContent = '👁️';
+    input.type = "password";
+    el.innerHTML = '<i class="fi fi-rr-eye"></i>';
   }
 }
 </script>

@@ -20,8 +20,7 @@ $sql_student_info = "SELECT p.full_name, p.profile_picture, p.gender
                      FROM personal_info p
                      INNER JOIN education_info e ON p.id = e.personal_id
                      WHERE e.student_id = ?";
-$stmt_student_info = $conn->prepare($sql_student_info);
-if ($stmt_student_info) {
+if ($stmt_student_info = $conn->prepare($sql_student_info)) {
     $stmt_student_info->bind_param("s", $student_id);
     $stmt_student_info->execute();
     $res = $stmt_student_info->get_result();
@@ -34,7 +33,6 @@ if ($stmt_student_info) {
         if (!empty($row['profile_picture']) && file_exists('uploads/profile_images/' . $row['profile_picture'])) {
             $profile_picture_src = 'uploads/profile_images/' . h($row['profile_picture']);
         } else {
-            // UI-Avatars fallback
             $avatar_bg =
                 ($gender === 'ชาย' || $gender === 'male') ? '3498db' :
                 (($gender === 'หญิง' || $gender === 'female') ? 'e91e63' : '9b59b6');
@@ -45,7 +43,7 @@ if ($stmt_student_info) {
     $stmt_student_info->close();
 }
 
-/* ----------------- helper: schema check ----------------- */
+/* ----------------- DB helpers ----------------- */
 function db_name(mysqli $conn): string {
     $db = 'studentregistration';
     if ($r = $conn->query("SELECT DATABASE() AS dbname")) {
@@ -58,10 +56,8 @@ function has_table(mysqli $conn, string $db, string $table): bool {
     $st = $conn->prepare($sql);
     $st->bind_param('ss', $db, $table);
     $st->execute();
-    $c = 0;
-    if ($g = $st->get_result()) { $c = (int)$g->fetch_assoc()['c']; }
-    $st->close();
-    return $c > 0;
+    $g = $st->get_result(); $st->close();
+    return $g && ((int)$g->fetch_assoc()['c'] > 0);
 }
 function has_col(mysqli $conn, string $db, string $table, string $col): bool {
     $sql = "SELECT COUNT(*) AS c FROM information_schema.COLUMNS
@@ -69,59 +65,117 @@ function has_col(mysqli $conn, string $db, string $table, string $col): bool {
     $st = $conn->prepare($sql);
     $st->bind_param('sss', $db, $table, $col);
     $st->execute();
-    $c = 0;
-    if ($g = $st->get_result()) { $c = (int)$g->fetch_assoc()['c']; }
-    $st->close();
-    return $c > 0;
+    $g = $st->get_result(); $st->close();
+    return $g && ((int)$g->fetch_assoc()['c'] > 0);
 }
 
+/* ----------------- ทำให้ตาราง test_history ใช้งานได้แน่นอน ----------------- */
 $db = db_name($conn);
 
-/* ----------------- คิวรีประวัติแบบ auto-detect ----------------- */
+/** สร้างตารางถ้ายังไม่มี (สคีมาตามที่ quiz.php ใช้บันทึก) */
+if (!$conn->query("
+    CREATE TABLE IF NOT EXISTS test_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(255) NOT NULL,
+        recommended_group VARCHAR(255) DEFAULT NULL,
+        recommended_subjects TEXT DEFAULT NULL,
+        no_count INT DEFAULT 0,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_user_time (username, timestamp)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+")) {
+    // ถ้าสร้างไม่ได้ ให้โชว์ข้อความเตือน แต่อย่าให้หน้าเด้ง
+    $create_error = "สร้างตาราง test_history ไม่สำเร็จ: ".h($conn->error);
+} else {
+    $create_error = '';
+}
+
+/** เติมคอลัมน์ที่ขาด (รองรับ MySQL 8+: ADD COLUMN IF NOT EXISTS; ถ้าเวอร์ชันต่ำกว่า ให้ข้ามเงียบ ๆ) */
+@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS username VARCHAR(255) NOT NULL");
+@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS recommended_group VARCHAR(255) NULL");
+@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS recommended_subjects TEXT NULL");
+@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS no_count INT DEFAULT 0");
+@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+@$conn->query("ALTER TABLE test_history ADD INDEX IF NOT EXISTS idx_user_time (username, timestamp)");
+
+/* ถ้าเวอร์ชัน MySQL ไม่รองรับ IF NOT EXISTS ให้เช็คซ้ำแบบละเอียด แล้วเติมแบบมีเงื่อนไข */
+$needFix = [];
+foreach (['username','recommended_group','recommended_subjects','no_count','timestamp'] as $col) {
+    if (!has_col($conn, $db, 'test_history', $col)) $needFix[] = $col;
+}
+if (!empty($needFix)) {
+    // เติมทีละคอลัมน์ด้วย ALTER (สำหรับ MySQL 5.7)
+    foreach ($needFix as $col) {
+        if ($col === 'username') {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN username VARCHAR(255) NOT NULL");
+        } elseif ($col === 'recommended_group') {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN recommended_group VARCHAR(255) NULL");
+        } elseif ($col === 'recommended_subjects') {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN recommended_subjects TEXT NULL");
+        } elseif ($col === 'no_count') {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN no_count INT DEFAULT 0");
+        } elseif ($col === 'timestamp') {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+        }
+    }
+    // ดัชนี
+    if ($conn->query("SHOW INDEX FROM test_history WHERE Key_name='idx_user_time'")->num_rows === 0) {
+        @$conn->query("ALTER TABLE test_history ADD INDEX idx_user_time (username, `timestamp`)");
+    }
+}
+
+/* ----------------- คิวรีประวัติแบบแข็งแรง ----------------- */
+/** โค้ด quiz.php ใช้คอลัมน์ username ตอนบันทึก ดังนั้นเราจะอ่านจากคอลัมน์นี้ก่อน
+ *  ถ้าไม่มีจริง ๆ (ระบบเก่าบันทึกเป็น student_id) จะ fallback ไป student_id
+ */
 $history_result = null;
 $history_error = '';
 
 if (has_table($conn, $db, 'test_history')) {
-    // เดาว่าคอลัมน์ "รหัสนักศึกษา" ชื่ออะไร
-    $idCandidates = ['student_id', 'username', 'user_id', 'sid', 'stu_id', 'student_code', 'std_id', 'std_code'];
+    // หา id column ที่ใช้งานได้จริง ๆ
     $idCol = null;
-    foreach ($idCandidates as $c) {
-        if (has_col($conn, $db, 'test_history', $c)) { $idCol = $c; break; }
+    if (has_col($conn, $db, 'test_history', 'username')) $idCol = 'username';
+    elseif (has_col($conn, $db, 'test_history', 'student_id')) $idCol = 'student_id';
+    else {
+        // ถ้าไม่มีสักอัน ให้สร้าง username แล้วคัดลอกจาก student_id ถ้ามี (ทำครั้งเดียว)
+        if (!has_col($conn, $db, 'test_history', 'username')) {
+            @$conn->query("ALTER TABLE test_history ADD COLUMN username VARCHAR(255) NULL");
+        }
+        if (has_col($conn, $db, 'test_history', 'student_id')) {
+            @$conn->query("UPDATE test_history SET username = COALESCE(username, student_id)");
+        }
+        @$conn->query("ALTER TABLE test_history MODIFY COLUMN username VARCHAR(255) NOT NULL");
+        $idCol = 'username';
     }
 
-    // เดาว่าคอลัมน์วันที่ชื่ออะไร
+    // หา time column
     $timeCandidates = ['timestamp', 'created_at', 'taken_at', 'updated_at', 'createdAt'];
     $timeCol = null;
     foreach ($timeCandidates as $c) {
         if (has_col($conn, $db, 'test_history', $c)) { $timeCol = $c; break; }
     }
-    if (!$timeCol) $timeCol = 'timestamp'; // เผื่อไว้ ใช้ใน ORDER BY ถ้าไม่มีจริงจะ error → ด้านล่างเราป้องกันอีกชั้น
+    // ถ้าไม่มีจริง ๆ ให้สร้าง timestamp
+    if (!$timeCol) {
+        @$conn->query("ALTER TABLE test_history ADD COLUMN `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+        $timeCol = 'timestamp';
+    }
 
-    // คอลัมน์คอนเทนต์
+    // columns to select
     $cols = [];
-    // เวลา
-    if (has_col($conn, $db, 'test_history', $timeCol)) $cols[] = "`$timeCol` AS dt";
-    // กลุ่มที่แนะนำ
+    $cols[] = "`$timeCol` AS dt";
     if (has_col($conn, $db, 'test_history', 'recommended_group')) $cols[] = "recommended_group";
-    // วิชาที่แนะนำ
     if (has_col($conn, $db, 'test_history', 'recommended_subjects')) $cols[] = "recommended_subjects";
 
-    if ($idCol && !empty($cols)) {
-        $sel = implode(', ', $cols);
-        $order = has_col($conn, $db, 'test_history', $timeCol) ? "ORDER BY `$timeCol` DESC" : "";
+    $sel = implode(', ', $cols);
+    $history_sql = "SELECT $sel FROM test_history WHERE `$idCol` = ? ORDER BY `$timeCol` DESC";
 
-        $history_sql = "SELECT $sel FROM test_history WHERE `$idCol` = ? $order";
-        $stmt_history = $conn->prepare($history_sql);
-        if ($stmt_history) {
-            $stmt_history->bind_param("s", $student_id);
-            $stmt_history->execute();
-            $history_result = $stmt_history->get_result();
-            $stmt_history->close();
-        } else {
-            $history_error = "ไม่สามารถเตรียมคำสั่งอ่านประวัติได้: " . h($conn->error);
-        }
+    if ($stmt_history = $conn->prepare($history_sql)) {
+        $stmt_history->bind_param("s", $student_id);
+        $stmt_history->execute();
+        $history_result = $stmt_history->get_result();
+        $stmt_history->close();
     } else {
-        $history_error = "พบตาราง test_history แต่ไม่รู้ชื่อคอลัมน์รหัสนักศึกษาหรือคอลัมน์ข้อมูล (ลองตรวจ schema ของ test_history)";
+        $history_error = "ไม่สามารถเตรียมคำสั่งอ่านประวัติได้: " . h($conn->error);
     }
 } else {
     $history_error = "ไม่พบตาราง test_history — หน้านี้จึงยังแสดงประวัติไม่ได้";
@@ -210,9 +264,16 @@ if (has_table($conn, $db, 'test_history')) {
       <h2 class="card-title">ประวัติการทำแบบทดสอบ</h2>
     </div>
     <div class="card-body">
-      <?php if ($history_error): ?>
-        <div class="alert">ℹ️ <?php echo $history_error; ?></div>
+      <?php if (!empty($create_error)): ?>
+        <div class="alert">⚠️ <?php echo $create_error; ?></div>
       <?php endif; ?>
+
+      <?php
+      // ข้อความ error จากขั้นอ่านข้อมูล
+      if (!empty($history_error)) {
+          echo '<div class="alert">ℹ️ '. $history_error .'</div>';
+      }
+      ?>
 
       <?php if ($history_result && $history_result->num_rows > 0): ?>
         <table class="table">
@@ -233,7 +294,7 @@ if (has_table($conn, $db, 'test_history')) {
             <?php endwhile; ?>
           </tbody>
         </table>
-      <?php elseif (!$history_error): ?>
+      <?php elseif (empty($history_error)): ?>
         <p style="text-align:center;color:#7f8c8d;font-style:italic;padding:18px">
           ยังไม่มีประวัติการทำแบบทดสอบในขณะนี้ ข้อมูลจะปรากฏขึ้นเมื่อคุณทำแบบทดสอบเสร็จสิ้น
         </p>

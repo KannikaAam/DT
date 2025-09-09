@@ -4,6 +4,8 @@
 // - นับ "ใช้ไป" จากตารางจริง test_history (auto-detect คอลัมน์รหัส นศ.)
 // - ถ้าไม่พบ test_history → fallback ไปใช้ student_quiz_status.quiz_attempts
 // - อัปเดตได้เฉพาะ admin_override_attempts และ academic_status
+// - เพิ่ม: ปุ่ม "ล้างประวัติการทำแบบทดสอบ" ต่อแถว (มียืนยัน)
+// - ใช้ mysqli + db_connect.php (ต้องมี $conn)
 
 session_start();
 include 'db_connect.php'; // ต้องมี $conn = new mysqli(...);
@@ -11,6 +13,16 @@ include 'db_connect.php'; // ต้องมี $conn = new mysqli(...);
 if (!isset($_SESSION['admin_id'])) {
     header("Location: admin_login.php");
     exit();
+}
+
+/* ----------------- CSRF ----------------- */
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+function require_csrf($t){
+    if (!hash_equals($_SESSION['csrf_token'] ?? '', $t ?? '')) {
+        http_response_code(403); exit('CSRF verification failed');
+    }
 }
 
 /* ----------------- Helper ----------------- */
@@ -21,6 +33,7 @@ function currentDatabase(mysqli $conn): string {
     $db = 'studentregistration';
     if ($r = $conn->query("SELECT DATABASE() AS dbname")) {
         if ($rw = $r->fetch_assoc()) { $db = $rw['dbname'] ?: $db; }
+        $r->free();
     }
     return $db;
 }
@@ -30,8 +43,8 @@ function hasTable(mysqli $conn, string $db, string $table): bool {
     $st = $conn->prepare($sql);
     $st->bind_param('ss', $db, $table);
     $st->execute();
-    $c = 0;
-    if ($res = $st->get_result()) { $c = (int)$res->fetch_assoc()['c']; }
+    $res = $st->get_result();
+    $c = $res ? (int)$res->fetch_assoc()['c'] : 0;
     $st->close();
     return $c > 0;
 }
@@ -41,55 +54,90 @@ function hasColumn(mysqli $conn, string $db, string $table, string $col): bool {
     $st = $conn->prepare($sql);
     $st->bind_param('sss', $db, $table, $col);
     $st->execute();
-    $c = 0;
-    if ($res = $st->get_result()) { $c = (int)$res->fetch_assoc()['c']; }
+    $res = $st->get_result();
+    $c = $res ? (int)$res->fetch_assoc()['c'] : 0;
     $st->close();
     return $c > 0;
 }
+function ensureTable(mysqli $conn, string $table, string $ddl){
+    if (!$conn->query("CREATE TABLE IF NOT EXISTS `$table` $ddl")) {
+        http_response_code(500); exit("Cannot ensure table `$table`: ".$conn->error);
+    }
+}
 function ensureColumn(mysqli $conn, string $db, string $table, string $column, string $addDDL){
     if (!hasColumn($conn, $db, $table, $column)) {
-        $conn->query("ALTER TABLE `$table` ADD COLUMN $addDDL");
+        if (!$conn->query("ALTER TABLE `$table` ADD COLUMN `$column` $addDDL")) {
+            http_response_code(500); exit("Cannot add column `$column` on `$table`: ".$conn->error);
+        }
     }
 }
 
-/* ----------------- Auto-migrate บางคอลัมน์พื้นฐาน ----------------- */
+/* ----------------- Auto-migrate: ensure table & columns ----------------- */
 $database = currentDatabase($conn);
+
+// ensure table exists first
+ensureTable($conn, 'student_quiz_status', "(
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    student_id VARCHAR(64) NOT NULL,
+    quiz_attempts INT NOT NULL DEFAULT 0,
+    recommended_count INT NOT NULL DEFAULT 0,
+    admin_override_attempts INT NOT NULL DEFAULT 0,
+    academic_status ENUM('active','graduated','leave','suspended') NOT NULL DEFAULT 'active',
+    updated_at TIMESTAMP NULL DEFAULT NULL,
+    UNIQUE KEY uniq_student (student_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// and columns (idempotent safety)
 ensureColumn($conn, $database, 'student_quiz_status', 'quiz_attempts',           'INT NOT NULL DEFAULT 0');
-ensureColumn($conn, $database, 'student_quiz_status', 'recommended_count',       'INT NOT NULL DEFAULT 0'); // legacy
+ensureColumn($conn, $database, 'student_quiz_status', 'recommended_count',       'INT NOT NULL DEFAULT 0');
 ensureColumn($conn, $database, 'student_quiz_status', 'admin_override_attempts', 'INT NOT NULL DEFAULT 0');
 ensureColumn($conn, $database, 'student_quiz_status', 'academic_status',         "ENUM('active','graduated','leave','suspended') NOT NULL DEFAULT 'active'");
+ensureColumn($conn, $database, 'student_quiz_status', 'updated_at',              "TIMESTAMP NULL DEFAULT NULL");
 
-/* ----------------- Submit handler (update override + status) ----------------- */
+/* ----------------- ตรวจ test_history เพื่อนับครั้งทำจริง (ต้องรู้ก่อน handle POST) ----------------- */
+$thExists = hasTable($conn, $database, 'test_history');
+$thSidCol = null;
+if ($thExists) {
+    foreach (['username','student_id','studentID','sid','stu_id','student_code','std_id','std_code'] as $cand) {
+        if (hasColumn($conn, $database, 'test_history', $cand)) { $thSidCol = $cand; break; }
+    }
+}
+
+/* ----------------- Submit handlers ----------------- */
 $message = ''; $error = '';
+
+/* (A) อัปเดต override/status */
 if (isset($_POST['update_status'])) {
+    require_csrf($_POST['csrf'] ?? '');
+
     $student_id              = trim($_POST['student_id'] ?? '');
     $admin_override_attempts = (int)($_POST['admin_override_attempts'] ?? 0);
-
-    $academic_status = $_POST['academic_status'] ?? 'active';
-    $allowed_status  = ['active','graduated','leave','suspended'];
+    $academic_status         = $_POST['academic_status'] ?? 'active';
+    $allowed_status          = ['active','graduated','leave','suspended'];
     if (!in_array($academic_status, $allowed_status, true)) { $academic_status = 'active'; }
 
     if ($student_id === '') {
         $error = "ไม่พบรหัสนักศึกษา";
     } else {
-        // เช็คว่ามี record ใน student_quiz_status หรือยัง
-        $check_stmt = $conn->prepare("SELECT id FROM student_quiz_status WHERE student_id = ?");
+        // upsert by student_id
+        $check_stmt = $conn->prepare("SELECT id FROM student_quiz_status WHERE student_id = ? LIMIT 1");
         $check_stmt->bind_param("s", $student_id);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
+        $exists = ($check_result && $check_result->num_rows > 0);
         $check_stmt->close();
 
-        if ($check_result && $check_result->num_rows > 0) {
+        if ($exists) {
             $stmt = $conn->prepare("
                 UPDATE student_quiz_status
-                SET admin_override_attempts = ?, academic_status = ?
+                SET admin_override_attempts = ?, academic_status = ?, updated_at = NOW()
                 WHERE student_id = ?
             ");
             $stmt->bind_param("iss", $admin_override_attempts, $academic_status, $student_id);
         } else {
             $stmt = $conn->prepare("
-                INSERT INTO student_quiz_status (student_id, admin_override_attempts, academic_status)
-                VALUES (?, ?, ?)
+                INSERT INTO student_quiz_status (student_id, admin_override_attempts, academic_status, updated_at)
+                VALUES (?, ?, ?, NOW())
             ");
             $stmt->bind_param("sis", $student_id, $admin_override_attempts, $academic_status);
         }
@@ -103,18 +151,56 @@ if (isset($_POST['update_status'])) {
     }
 }
 
-/* ----------------- ตรวจ test_history เพื่อนับครั้งทำจริง ----------------- */
-$thExists = hasTable($conn, $database, 'test_history');
-$thSidCol = null;
-if ($thExists) {
-    foreach (['username','student_id','studentID','sid','stu_id','student_code','std_id','std_code'] as $cand) {
-        if (hasColumn($conn, $database, 'test_history', $cand)) { $thSidCol = $cand; break; }
+/* (B) ล้างประวัติการทำแบบทดสอบของนักศึกษา */
+if (isset($_POST['clear_attempts'])) {
+    require_csrf($_POST['csrf'] ?? '');
+    $student_id = trim($_POST['student_id'] ?? '');
+
+    if ($student_id === '') {
+        $error = "ไม่พบรหัสนักศึกษา";
+    } else {
+        $conn->begin_transaction();
+        try {
+            // 1) ถ้ามี test_history และรู้คอลัมน์รหัส → ลบรายการของ นศ. คนนี้
+            if ($thExists && $thSidCol) {
+                $sqlDel = "DELETE FROM test_history WHERE TRIM(`$thSidCol`) = TRIM(?)";
+                $stDel  = $conn->prepare($sqlDel);
+                $stDel->bind_param("s", $student_id);
+                if (!$stDel->execute()) {
+                    throw new Exception("ลบ test_history ไม่สำเร็จ: ".$stDel->error);
+                }
+                $affected = $stDel->affected_rows;
+                $stDel->close();
+            } else {
+                $affected = 0; // ไม่มีตาราง test_history ให้ลบ
+            }
+
+            // 2) รีเซ็ตตัวนับ fallback ใน student_quiz_status ให้เป็น 0 (อัปเซิร์ต)
+            $sqlUp = "
+                INSERT INTO student_quiz_status (student_id, quiz_attempts, updated_at)
+                VALUES (?, 0, NOW())
+                ON DUPLICATE KEY UPDATE quiz_attempts=VALUES(quiz_attempts), updated_at=VALUES(updated_at)
+            ";
+            $stUp = $conn->prepare($sqlUp);
+            $stUp->bind_param("s", $student_id);
+            if (!$stUp->execute()) {
+                throw new Exception("อัปเดต quiz_attempts ไม่สำเร็จ: ".$stUp->error);
+            }
+            $stUp->close();
+
+            $conn->commit();
+            $msg = "ล้างประวัติการทำแบบทดสอบของ '".h($student_id)."' เรียบร้อย";
+            if ($affected > 0) { $msg .= " (ลบออกจาก test_history: {$affected} แถว)"; }
+            $message = $msg;
+        } catch (Throwable $e) {
+            $conn->rollback();
+            $error = "ไม่สามารถล้างประวัติได้: ".h($e->getMessage());
+        }
     }
 }
 
 /* ----------------- สร้าง SQL หลัก (มี fallback เสมอ) ----------------- */
 if ($thExists && $thSidCol) {
-    // ใช้คอลัมน์จริงจาก $thSidCol
     $students_status_sql = "
         SELECT
             pi.full_name,
@@ -134,7 +220,6 @@ if ($thExists && $thSidCol) {
         ORDER BY ei.student_id ASC
     ";
 } else {
-    // Fallback: ใช้ค่าที่ล็อกใน student_quiz_status
     $students_status_sql = "
         SELECT
             pi.full_name,
@@ -224,7 +309,7 @@ body{
 
 /* Table */
 .table-wrap{position:relative;overflow:auto;border-radius:16px}
-table{width:100%;border-collapse:separate;border-spacing:0;min-width:980px}
+table{width:100%;border-collapse:separate;border-spacing:0;min-width:1080px}
 thead th{
   position:sticky;top:0;z-index:1;background:rgba(15,20,25,.95);backdrop-filter:blur(10px);
   border-bottom:2px solid var(--border);padding:12px 14px;text-align:left;font-weight:800;font-size:13px;text-transform:uppercase;letter-spacing:.5px
@@ -242,8 +327,10 @@ td input[type="number"], td select{
   width:120px; padding:8px 10px; border-radius:10px; border:1px solid var(--border);
   background:rgba(15,20,25,.55); color:var(--text);
 }
-td .btn-update{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--grad-success);color:#fff;font-weight:800;cursor:pointer}
+td .btn-update{padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--grad-success);color:#fff;font-weight:800;cursor:pointer}
 td .btn-update:hover{filter:brightness(1.05)}
+td .btn-clear{padding:8px 12px;border:1px solid #a31d33;border-radius:10px;background:var(--grad-danger);color:#fff;font-weight:800;cursor:pointer}
+td .btn-clear:hover{filter:brightness(1.05)}
 
 /* Helpers */
 .tools{display:flex;gap:8px;flex-wrap:wrap}
@@ -263,7 +350,7 @@ td .btn-update:hover{filter:brightness(1.05)}
   </div>
   <div class="nav-actions">
     <div style="color:var(--muted)">ยินดีต้อนรับ, <b><?php echo h($_SESSION['admin_username'] ?? 'Admin'); ?></b></div>
-    <a href="admin_dashboard.php" class="btn">🏠 หน้าหลัก</a>
+    <a href="admin_dashboard.php" class="btn">หน้าหลัก</a>
     <a href="admin_logout.php" class="btn btn-danger">ออกจากระบบ</a>
   </div>
 </div>
@@ -309,7 +396,7 @@ td .btn-update:hover{filter:brightness(1.05)}
       <div>
         <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:12px">เครื่องมือ</label>
         <div class="tools">
-          <button class="btn btn-primary" id="clearFilters" type="button">🔄 ล้างตัวกรอง</button>
+          <button class="btn btn-primary" id="clearFilters" type="button">ยกเลิก</button>
         </div>
       </div>
     </div>
@@ -324,7 +411,7 @@ td .btn-update:hover{filter:brightness(1.05)}
             <th style="width:280px">สิทธิ์ปกติ (3 ครั้ง) / ใช้ไป / เหลือ</th>
             <th style="width:200px">อนุญาตทำเพิ่ม (แอดมิน)</th>
             <th style="width:260px">สถานะนักศึกษา</th>
-            <th style="width:120px">บันทึก</th>
+            <th style="width:220px">บันทึก / ล้างประวัติ</th>
           </tr>
         </thead>
         <tbody>
@@ -359,6 +446,7 @@ td .btn-update:hover{filter:brightness(1.05)}
             </td>
 
             <form action="manage_students.php" method="POST">
+              <input type="hidden" name="csrf" value="<?php echo h($_SESSION['csrf_token']); ?>">
               <input type="hidden" name="student_id" value="<?php echo h($sid); ?>">
               <td><input type="number" name="admin_override_attempts" value="<?php echo h($ov); ?>" min="0"></td>
               <td>
@@ -380,7 +468,15 @@ td .btn-update:hover{filter:brightness(1.05)}
                   <span class="badge <?php echo $badgeCls; ?> currentBadge"><?php echo h($opts[$ast] ?? 'กำลังศึกษา'); ?></span>
                 </div>
               </td>
-              <td><button type="submit" name="update_status" class="btn-update">💾 อัปเดต</button></td>
+              <td>
+                <div class="tools" style="gap:6px;flex-wrap:wrap">
+                  <button type="submit" name="update_status" class="btn-update"> อัปเดต</button>
+                  <button type="submit" name="clear_attempts" value="1" class="btn-clear"
+                          onclick="return confirm('ยืนยันล้างประวัติการทำแบบทดสอบของ <?php echo h($sid); ?> ?\n- ถ้ามี test_history จะลบเฉพาะของคนนี้\n- ตัวนับ fallback จะถูกรีเซ็ตเป็น 0');">
+                     ลบข้อมูล
+                  </button>
+                </div>
+              </td>
             </form>
           </tr>
           <?php endwhile; ?>

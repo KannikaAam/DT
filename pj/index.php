@@ -60,8 +60,8 @@
         }
         
         .logo img {
-            height: 90px;
-            margin-right: 15px;
+            height: 120px;
+            margin-right: 10px;
             flex-shrink: 0;
         }
         
@@ -86,7 +86,7 @@
         
         nav {
             flex-shrink: 0;
-            margin-left: 20px;
+            margin-left: 10px;
         }
         
         nav ul {
@@ -776,7 +776,7 @@
         <div class="container">
             <div class="header-content">
                 <div class="logo">
-                    <img src="images/logo.png" alt="โลโก้มหาวิทยาลัย">
+                    <img src="images/logo2.png" alt="โลโก้มหาวิทยาลัย">
                     <div class="logo-text">
                         <h1>ระบบแนะนำรายวิชาชีพเลือกด้วยต้นไม้ตัดสินใจ</h1>
                         <p>Academic Path Recommender using Decision Trees</p>
@@ -883,7 +883,7 @@
             </div>
             <div class="about-content">
                 <div class="about-image">
-                    <img src="images/about-us.jpg" alt="ภาพเกี่ยวกับเรา">
+                    <img src="images/image.png" alt="ภาพเกี่ยวกับเรา">
                 </div>
                 <div class="about-text">
                     <h3>ความเป็นมาและวัตถุประสงค์</h3>
@@ -920,8 +920,6 @@
                     <h4>ติดตามเรา</h4>
                     <div class="social-links">
                         <a href="#"><i class="fab fa-facebook-f"></i></a>
-                        <a href="#"><i class="fab fa-twitter"></i></a>
-                        <a href="#"><i class="fab fa-linkedin-in"></i></a>
                         <a href="#"><i class="fab fa-instagram"></i></a>
                     </div>
                 </div>
