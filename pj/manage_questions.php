@@ -686,8 +686,7 @@ const countSelected = $('#countSelected');
 
 function updateSelectedHiddenInputs(){
   // ล้างของเก่าก่อน
-  Array.from(bulkForm.querySelectorAll('input[name="ids[]"]')).forEach(el=>el.remove());
-  // เพิ่มเฉพาะที่ถูกเลือกและมองเห็นอยู่ (หลังกรอง)
+  Array.from(bulkForm.querySelectorAll('input[name="ids[]"]')).forEach(el=>el.remove());  // เพิ่มเฉพาะที่ถูกเลือกและมองเห็นอยู่ (หลังกรอง)
   const visibleSelected = rowChks.filter(chk => chk.checked && chk.closest('.item').style.display !== 'none');
   visibleSelected.forEach(chk=>{
     const inp = document.createElement('input');
@@ -716,7 +715,6 @@ selectAll.addEventListener('change', ()=>{
 // เมื่อค้นหา/กรอง ให้รีเฟรชจำนวนที่เลือก (แต่ไม่ยุ่งกับ checkbox เดิม)
 search.addEventListener('input', ()=>setTimeout(updateSelectedHiddenInputs, 0));
 filterGroup.addEventListener('change', ()=>setTimeout(updateSelectedHiddenInputs, 0));
-
 </script>
 </body>
 </html>

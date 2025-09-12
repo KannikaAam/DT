@@ -1,0 +1,27 @@
+table,rows,code_ref_count,fk_parents,fk_children,engine,created,flag_unused
+activity_log,0,1,user_login,,InnoDB,"2025-09-12 03:20:13",NO
+admins,3,2,,,InnoDB,"2025-09-12 03:20:13",NO
+course_groups,9,3,courses,enrollments,InnoDB,"2025-09-12 03:20:13",NO
+courses,17,5,,course_groups|student_courses,InnoDB,"2025-09-12 21:35:11",NO
+education_info,18,11,personal_info,students|student_quiz_status|user_login,InnoDB,"2025-09-12 03:20:13",NO
+enrollments,0,1,course_groups,,InnoDB,"2025-09-12 03:20:13",NO
+faculties,0,1,,,InnoDB,"2025-09-12 03:20:13",NO
+form_options,55,6,,,InnoDB,"2025-09-12 03:20:13",NO
+password_reset_requests,35,2,,,InnoDB,"2025-09-12 03:20:13",NO
+password_resets,4,4,,,InnoDB,"2025-09-12 03:20:13",NO
+personal_info,18,10,,education_info|students,InnoDB,"2025-09-12 03:20:13",NO
+questions,33,3,subject_groups,quiz_answers,InnoDB,"2025-09-13 02:15:01",NO
+quiz_answers,58,2,questions|quiz_questions,,InnoDB,"2025-09-12 03:20:13",NO
+quiz_attempts,0,1,quiz_results,,InnoDB,"2025-09-12 03:20:13",NO
+quiz_questions,4,0,quiz_questions,quiz_answers|quiz_questions,InnoDB,"2025-09-12 03:20:13",NO
+quiz_results,63,2,,quiz_attempts,InnoDB,"2025-09-12 03:20:13",NO
+recommended_groups,1,1,,recommended_subjects,InnoDB,"2025-09-12 03:20:13",NO
+recommended_subjects,0,1,recommended_groups,,InnoDB,"2025-09-12 19:54:05",NO
+student_courses,0,1,students|courses,,InnoDB,"2025-09-12 03:20:13",NO
+student_quiz_status,12,4,education_info,,InnoDB,"2025-09-12 03:20:13",NO
+students,16,4,user_login|personal_info|education_info,student_courses,InnoDB,"2025-09-12 03:20:13",NO
+subject_groups,3,4,,questions,InnoDB,"2025-09-12 21:35:11",NO
+subjects,18,3,,,InnoDB,"2025-09-12 20:40:15",NO
+teacher,4,10,,,InnoDB,"2025-09-12 03:20:13",NO
+test_history,40,6,,,InnoDB,"2025-09-12 03:20:13",NO
+user_login,17,4,education_info,activity_log|students,InnoDB,"2025-09-12 03:20:13",NO

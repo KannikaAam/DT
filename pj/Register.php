@@ -84,10 +84,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         if (!$stmt_education->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error); }
 
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-        $sql_login = "INSERT INTO user_login (student_id, password) VALUES (?, ?)";
+        $sql_login = "INSERT INTO user_login (username, student_id, password) VALUES (?, ?, ?)";
         $stmt_login = $conn->prepare($sql_login);
-        $stmt_login->bind_param("ss", $student_id, $hashed_password);
-        if (!$stmt_login->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error); }
+        $stmt_login->bind_param("sss", $student_id, $student_id, $hashed_password);
+        if (!$stmt_login->execute()) {
+            throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error);
+        }
 
         $conn->commit();
         $success_message = "ลงทะเบียนสำเร็จ! ยินดีต้อนรับคุณ " . htmlspecialchars($full_name);

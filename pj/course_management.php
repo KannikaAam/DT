@@ -108,6 +108,37 @@ if (isset($_GET['ajax']) && in_array($_GET['ajax'], ['meta','majors_by_faculty']
   exit;
 }
 
+/* ---------- PUBLIC API (ต่อจาก majors_by_faculty) ---------- */
+
+// 2) programs_by_major
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'programs_by_major') {
+  header('Content-Type: application/json; charset=utf-8');
+  $major = $_GET['major'] ?? '';
+  // ดึง program โดยอิง parent_value = id ของ major
+  $st = $pdo->prepare("SELECT id AS value, label 
+                       FROM form_options 
+                       WHERE type='program' AND parent_value = ?
+                       ORDER BY label");
+  $st->execute([$major]);
+  echo json_encode(['programs' => $st->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+// 3) groups_by_program
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'groups_by_program') {
+  header('Content-Type: application/json; charset=utf-8');
+  $program = $_GET['program'] ?? '';
+  // ดึง student_group โดยอิง parent_value = id ของ program
+  $st = $pdo->prepare("SELECT id AS value, label 
+                       FROM form_options 
+                       WHERE type='student_group' AND parent_value = ?
+                       ORDER BY label");
+  $st->execute([$program]);
+  echo json_encode(['groups' => $st->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
+  exit;
+}
+
+
 /* ===== Utils / Auth ===== */
 function e($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token']=bin2hex(random_bytes(32));

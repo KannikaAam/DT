@@ -1,4 +1,15 @@
 <?php
+/* =========================================================
+   manage_subjects.php — จัดการกลุ่มวิชา & รายวิชา (พร้อมวาง)
+   - เปลี่ยนไปใช้ subject_groups (แทน groups)
+   - แก้คีย์สถิติเป็น $stats['subject_groups']
+   - เพิ่ม AUTO-MIGRATE:
+       • ensureColumn สำหรับ subjects
+       • เพิ่ม courses.curriculum_name_value หากยังไม่มี
+       • ถ้าพบตารางเก่าชื่อ `groups` และยังไม่มี `subject_groups` → RENAME อัตโนมัติ
+   - รองรับดึงรายวิชาจากตาราง courses ตามหลักสูตร (form_options.type='curriculum_name')
+   ========================================================= */
+
 require 'db_connect.php';
 if (!isset($pdo)) { die('ไม่สามารถเชื่อมต่อฐานข้อมูลได้ กรุณาตรวจสอบไฟล์ db_connect.php'); }
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -7,7 +18,7 @@ $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $SELF   = $_SERVER['PHP_SELF'];
 $SELF_H = htmlspecialchars($SELF, ENT_QUOTES, 'UTF-8');
 
-/* ---------- Helper: หา column จริงในตาราง (กัน schema ต่างกัน) ---------- */
+/* ---------- Helpers ---------- */
 function pickExistingColumn(PDO $pdo, string $table, array $candidates) {
     $in  = str_repeat('?,', count($candidates)-1) . '?';
     $sql = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -18,10 +29,6 @@ function pickExistingColumn(PDO $pdo, string $table, array $candidates) {
     foreach ($candidates as $c) if (in_array($c, $got, true)) return $c;
     return null;
 }
-
-/* =====================================================
-   AUTO-MIGRATE: subjects (เพิ่มปี/โค้ด/หน่วยกิต/เงื่อนไขก่อนหน้า)
-   ===================================================== */
 function ensureColumn(PDO $pdo, string $table, string $col, string $ddl){
     $q = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
                         WHERE TABLE_SCHEMA = DATABASE()
@@ -32,6 +39,29 @@ function ensureColumn(PDO $pdo, string $table, string $col, string $ddl){
         $pdo->exec("ALTER TABLE `$table` ADD COLUMN $ddl");
     }
 }
+function tableExists(PDO $pdo, string $table): bool {
+    $q = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $q->execute([$table]);
+    return (bool)$q->fetchColumn();
+}
+
+/* =====================================================
+   AUTO-MIGRATE: เปลี่ยนชื่อ groups -> subject_groups (ครั้งเดียว)
+   ===================================================== */
+try {
+    $hasGroups = tableExists($pdo, 'groups');
+    $hasSubjectGroups = tableExists($pdo, 'subject_groups');
+    if ($hasGroups && !$hasSubjectGroups) {
+        $pdo->exec("RENAME TABLE `groups` TO `subject_groups`");
+    }
+} catch (Throwable $e) {
+    // ไม่บังคับล่ม — ถ้าสิทธิ์ไม่พอ ให้จัดการเปลี่ยนชื่อด้วยตนเอง
+}
+
+/* =====================================================
+   AUTO-MIGRATE: subjects (เพิ่มปี/โค้ด/หน่วยกิต/เงื่อนไขก่อนหน้า)
+   ===================================================== */
 try {
     ensureColumn($pdo, 'subjects', 'subject_code',      "subject_code VARCHAR(50) NULL");
     ensureColumn($pdo, 'subjects', 'credits',           "credits INT NULL");
@@ -40,6 +70,18 @@ try {
 } catch (Throwable $e) {
     // ไม่บังคับล่ม
 }
+
+/* ---------- เพิ่มคอลัมน์เชื่อมหลักสูตรให้ courses ถ้ายังไม่มี ---------- */
+try {
+    $q = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE()
+                          AND TABLE_NAME = 'courses'
+                          AND COLUMN_NAME = 'curriculum_name_value'");
+    $q->execute();
+    if (!$q->fetchColumn()) {
+        $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_name_value VARCHAR(100) NULL DEFAULT NULL");
+    }
+} catch (Throwable $e) { /* ไม่บังคับให้ล่ม */ }
 
 /* =====================================================
    AJAX (JSON only)
@@ -108,18 +150,6 @@ if (isset($_GET['ajax'])) {
 
     echo json_encode(['ok'=>false,'error'=>'unknown endpoint','uri'=>$_SERVER['REQUEST_URI']], JSON_UNESCAPED_UNICODE); exit;
 }
-
-/* ---------- เพิ่มคอลัมน์เชื่อมหลักสูตรให้ courses ถ้ายังไม่มี ---------- */
-try {
-    $q = $pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-                        WHERE TABLE_SCHEMA = DATABASE()
-                          AND TABLE_NAME = 'courses'
-                          AND COLUMN_NAME = 'curriculum_name_value'");
-    $q->execute();
-    if (!$q->fetchColumn()) {
-        $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_name_value VARCHAR(100) NULL DEFAULT NULL");
-    }
-} catch (Throwable $e) { /* ไม่บังคับให้ล่ม */ }
 
 /* ---------- STATE ---------- */
 $group_to_edit   = null;
@@ -198,7 +228,7 @@ try {
     }
 
     if (isset($_POST['update_subject'])) {
-        // อัปเดตพื้นฐาน (ไม่บังคับแก้ metadata ในฟอร์มแก้ไขเดี่ยว)
+        // อัปเดตพื้นฐาน (แก้ไขเดี่ยว)
         $stmt = $pdo->prepare("UPDATE subjects SET subject_name = ?, group_id = ? WHERE subject_id = ?");
         $stmt->execute([$_POST['subject_name'], $_POST['group_id_for_subject'], $_POST['subject_id']]);
         header("Location: {$SELF}?message=".urlencode("แก้ไขรายวิชาสำเร็จ!")."&type=success"); exit;
@@ -242,12 +272,13 @@ try {
         ORDER BY g.group_name, s.subject_name
     ";
     $subjects = $pdo->query($subjects_sql)->fetchAll(PDO::FETCH_ASSOC);
-    $stats = ['groups' => count($groups), 'subjects' => count($subjects)];
+    // >>> FIX: ใช้คีย์ subject_groups
+    $stats = ['subject_groups' => count($groups), 'subjects' => count($subjects)];
 } catch (PDOException $e) {
     $message = "เกิดข้อผิดพลาดในการดึงข้อมูล: " . $e->getMessage();
     $message_type = 'error';
     $groups = $subjects = [];
-    $stats = ['groups' => 0, 'subjects' => 0];
+    $stats = ['subject_groups' => 0, 'subjects' => 0];
 }
 ?>
 <!DOCTYPE html>
@@ -334,8 +365,8 @@ label{font-weight:700;color:var(--muted);font-size:12px;text-transform:uppercase
   <div class="header">
     <div>
       <h2>จัดการกลุ่มวิชา & รายวิชา</h2>
-    <div class="chips" style="margin-top:10px">
-        <span class="badge">📚 กลุ่มวิชา: <strong><?php echo (int)$stats['groups']; ?></strong></span>
+      <div class="chips" style="margin-top:10px">
+        <span class="badge">📚 กลุ่มวิชา: <strong><?php echo (int)$stats['subject_groups']; ?></strong></span>
         <span class="badge">📘 รายวิชา: <strong><?php echo (int)$stats['subjects']; ?></strong></span>
       </div>
     </div>

@@ -4,7 +4,7 @@
    - Base limit = 3 + admin_override_attempts from student_quiz_status
    - Block when academic_status = 'suspended'
    - Count attempts from quiz_results per student_id
-   - Works with existing flow; adds permission checks on every request
+   - Uses subject_groups for group name and subjects for recommended subjects
    ========================================================= */
 session_start();
 require __DIR__ . '/db_connect.php'; // expects $pdo (PDO)
@@ -57,13 +57,14 @@ function compute_policy(PDO $pdo, int $student_id): array {
 }
 
 $policy = compute_policy($pdo, $STUDENT_ID);
+
 /* ===== ONE-TIME / REPEATABLE SEED & UPDATE QUESTIONS =====
    เรียกใช้โดยเปิด quiz.php?seed=1
    - เขียน question_text / order_in_group / group_id ลงตาราง questions โดยตรง
    - ถ้ามีแถวอยู่แล้วจะ UPDATE ให้ (ON DUPLICATE KEY)
    - group_id ปล่อย NULL ได้ ถ้าไม่อยากผูกกลุ่ม
 =========================================================== */
-if (isset($_GET['seed']) && (int)$_GET['seed'] === 1) {
+if (isset($_GET['seed']) && (int)$_GET['seed'] === 1 && isset($QUESTIONS) && is_array($QUESTIONS)) {
     // 0) กันสคีมา: ให้ group_id เป็น NULL ได้ และ FK เป็น SET NULL
     try {
         // กำจัดค่า 0
@@ -79,14 +80,10 @@ if (isset($_GET['seed']) && (int)$_GET['seed'] === 1) {
         }
         $pdo->exec("ALTER TABLE `questions` MODIFY COLUMN `group_id` INT NULL DEFAULT NULL");
 
-        
         $gt = null;
         if ((int)$pdo->query("SELECT COUNT(*) FROM information_schema.TABLES
                               WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='subject_groups'")->fetchColumn() > 0) {
             $gt = 'subject_groups';
-        } elseif ((int)$pdo->query("SELECT COUNT(*) FROM information_schema.TABLES
-                                    WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='groups'")->fetchColumn() > 0) {
-            $gt = '`groups`';
         }
         if ($gt) {
             $pdo->exec("ALTER TABLE `questions`
@@ -96,7 +93,6 @@ if (isset($_GET['seed']) && (int)$_GET['seed'] === 1) {
         }
     } catch (Throwable $e) { /* เงียบได้ */ }
 
-    
     // 2) อัปเสิร์ตเข้าตาราง `questions` โดยตรง
     $sql = "INSERT INTO `questions` (question_id, question_text, order_in_group, group_id)
             VALUES (?, ?, ?, ?)
@@ -108,7 +104,6 @@ if (isset($_GET['seed']) && (int)$_GET['seed'] === 1) {
 
     $pdo->beginTransaction();
     foreach ($QUESTIONS as $qid => [$text, $order, $gid]) {
-        
         $gid = ($gid === '' ? null : $gid);
         $st->execute([(int)$qid, (string)$text, (int)$order, $gid]);
     }
@@ -127,84 +122,24 @@ function hard_block(string $reason, array $policy){
     <title>ไม่อนุญาตให้ทำแบบทดสอบ</title>
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-<style>
+    <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
         font-family: 'Sarabun', sans-serif;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        min-height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 20px;
+        min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px;
     }
-    .error-card {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(20px);
-        border-radius: 24px;
-        padding: 40px;
-        max-width: 600px;
-        text-align: center;
-        box-shadow: 0 25px 50px rgba(0, 0, 0, 0.15);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    .error-icon {
-        font-size: 4rem;
-        color: #ef4444;
-        margin-bottom: 24px;
-        opacity: 0.8;
-    }
-    h2 {
-        color: #1f2937;
-        margin-bottom: 16px;
-        font-size: 1.8rem;
-        font-weight: 600;
-    }
-    .error-message {
-        color: #4b5563;
-        margin-bottom: 24px;
-        font-size: 1.1rem;
-        line-height: 1.6;
-    }
-    .status-pills {
-        display: flex;
-        gap: 12px;
-        justify-content: center;
-        flex-wrap: wrap;
-        margin-bottom: 32px;
-    }
-    .pill {
-        background: linear-gradient(135deg, #f3f4f6, #e5e7eb);
-        padding: 8px 16px;
-        border-radius: 25px;
-        font-size: 0.9rem;
-        font-weight: 500;
-        color: #374151;
-        border: 1px solid rgba(0, 0, 0, 0.1);
-    }
-    .btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 14px 28px;
-        background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-        color: white;
-        text-decoration: none;
-        border-radius: 12px;
-        font-weight: 600;
-        font-size: 1rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
-    }
-    .btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(59, 130, 246, 0.4);
-    }
+    .error-card { background: rgba(255,255,255,.95); backdrop-filter: blur(20px); border-radius:24px; padding:40px; max-width:600px; text-align:center; box-shadow:0 25px 50px rgba(0,0,0,.15); border:1px solid rgba(255,255,255,.2); }
+    .error-icon { font-size:4rem; color:#ef4444; margin-bottom:24px; opacity:.8; }
+    h2 { color:#1f2937; margin-bottom:16px; font-size:1.8rem; font-weight:600; }
+    .error-message { color:#4b5563; margin-bottom:24px; font-size:1.1rem; line-height:1.6; }
+    .status-pills { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin-bottom:32px; }
+    .pill { background: linear-gradient(135deg, #f3f4f6, #e5e7eb); padding:8px 16px; border-radius:25px; font-size:.9rem; font-weight:500; color:#374151; border:1px solid rgba(0,0,0,.1); }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:14px 28px; background:linear-gradient(135deg,#3b82f6,#1d4ed8); color:#fff; text-decoration:none; border-radius:12px; font-weight:600; font-size:1rem; transition:.3s; box-shadow:0 4px 15px rgba(59,130,246,.3); }
+    .btn:hover { transform: translateY(-2px); box-shadow:0 8px 25px rgba(59,130,246,.4); }
     </style>
     <div class="error-card">
-        <div class="error-icon">
-            <i class="fas fa-exclamation-triangle"></i>
-        </div>
+        <div class="error-icon"><i class="fas fa-exclamation-triangle"></i></div>
         <h2>ไม่สามารถทำแบบทดสอบได้</h2>
         <p class="error-message"><?= h($reason) ?></p>
         <div class="status-pills">
@@ -212,10 +147,7 @@ function hard_block(string $reason, array $policy){
             <span class="pill">ทำไปแล้ว: <b><?= (int)$policy['used'] ?></b></span>
             <span class="pill">สิทธิ์สูงสุด: <b><?= (int)$policy['max'] ?></b></span>
         </div>
-        <a class="btn" href="student_dashboard.php">
-            <i class="fas fa-arrow-left"></i>
-            กลับหน้าแดชบอร์ด
-        </a>
+        <a class="btn" href="student_dashboard.php"><i class="fas fa-arrow-left"></i> กลับหน้าแดชบอร์ด</a>
     </div>
     </html>
     <?php
@@ -251,14 +183,9 @@ function get_table_columns(PDO $pdo, string $name): array {
 try {
     // มีคอลัมน์ group_id ไหม
     $cols = $pdo->query("SHOW COLUMNS FROM `questions`")->fetchAll(PDO::FETCH_ASSOC);
-    $hasGroup = false; $groupIsNullable = true; $groupDefault = null;
+    $hasGroup = false;
     foreach ($cols as $c) {
-        if (strcasecmp($c['Field'], 'group_id') === 0) {
-            $hasGroup = true;
-            $groupIsNullable = (strtoupper($c['Null']) === 'YES');
-            $groupDefault = $c['Default'];
-            break;
-        }
+        if (strcasecmp($c['Field'], 'group_id') === 0) { $hasGroup = true; break; }
     }
     if ($hasGroup) {
         // ถ้ามีค่า 0 อยู่ให้เซ็ตเป็น NULL ก่อน
@@ -276,7 +203,7 @@ try {
             $pdo->exec("ALTER TABLE `questions` DROP FOREIGN KEY `{$fkName}`");
         }
 
-        // ปรับคอลัมน์ให้ NULL ได้ (กัน default 0)
+        // ปรับคอลัมน์ให้ NULL ได้
         $pdo->exec("ALTER TABLE `questions` MODIFY COLUMN `group_id` INT NULL");
 
         // เลือกตารางกลุ่มที่มีจริง
@@ -294,10 +221,7 @@ try {
                         ON DELETE SET NULL ON UPDATE CASCADE");
         }
     }
-} catch (Throwable $e) {
-    // ไม่ต้องหยุดระบบ แค่ log ก็พอ
-    error_log('questions schema repair failed: '.$e->getMessage());
-}
+} catch (Throwable $e) { error_log('questions schema repair failed: '.$e->getMessage()); }
 
 $QCOL=null;
 try{
@@ -307,7 +231,6 @@ try{
     elseif (in_array('id', $qcols, true)) $QCOL='id';
     else { $pdo->exec("ALTER TABLE `questions` ADD COLUMN `question_id` INT NOT NULL UNIQUE"); $QCOL='question_id'; $qcols[]='question_id'; }
 
-    $has_group_col = in_array('group_id', $qcols, true);
     $has_order_col = in_array('order_in_group', $qcols, true);
     if ($has_order_col) {
         $pdo->exec("ALTER TABLE `questions` MODIFY COLUMN `order_in_group` INT NOT NULL DEFAULT 0");
@@ -376,13 +299,13 @@ function save_and_prepare_result(PDO $pdo, int $student_id, int $group_id): int 
             foreach ($_SESSION['answers'] as $qid => $v) { $ins->execute([$result_id, (int)$qid, (int)$v]); }
         }
         $pdo->commit();
-        } catch (PDOException $e) {
-            if ($pdo->inTransaction()) { $pdo->rollBack(); }
-            die('เกิดข้อผิดพลาดในการบันทึกข้อมูล: '.$e->getMessage());
-        }
+    } catch (PDOException $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        die('เกิดข้อผิดพลาดในการบันทึกข้อมูล: '.$e->getMessage());
+    }
 
-        unset($_SESSION['answers']); // clear bag
-        return $group_id;
+    unset($_SESSION['answers']); // clear bag
+    return $group_id;
 }
 
 /* ---------- history for dashboard ---------- */
@@ -551,104 +474,161 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 /* =========================================================
-   PART 2: DISPLAY (FIX: handle start & question pages that were missing)
+   PART 2: DISPLAY
+   - ดึงชื่อกลุ่มจาก subject_groups
+   - ดึงรายวิชาของกลุ่มจาก subjects
    ========================================================= */
 $question = null;
 
 if ($SHOW_RESULT) {
-    try{
-        // === ดึงชื่อกลุ่มให้ได้ชัวร์ ไม่ว่าโครงสร้างตารางจะต่างกันยังไง ===
-        function pick_group_table(PDO $pdo): ?array {
-            $cands = [
-                ['table' => 'subject_groups', 'id' => ['group_id','id'], 'name' => ['group_name','name','title']],
-                ['table' => '`groups`',       'id' => ['group_id','id'], 'name' => ['group_name','name','title']],
-                ['table' => 'courses',        'id' => ['group_id'],      'name' => ['group_name','name','title']],
-            ];
+    try {
+        /* ===== Small helpers ===== */
+        $getCol = function(PDO $pdo, string $table, array $cands): ?string {
+            $cols = $pdo->query("SHOW COLUMNS FROM `{$table}`")->fetchAll(PDO::FETCH_COLUMN, 0);
+            if (!$cols) return null;
+            $lower = array_map('strtolower', $cols);
             foreach ($cands as $c) {
-                $st = $pdo->prepare("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
-                $tbl = str_replace('`','',$c['table']);
-                $st->execute([$tbl]);
-                if (!(int)$st->fetchColumn()) continue;
-
-                $cols = $pdo->query("SHOW COLUMNS FROM {$c['table']}")->fetchAll(PDO::FETCH_COLUMN, 0);
-                $colsLower = array_map('strtolower',$cols);
-                $idCol = null; $nameCol = null;
-                foreach ($c['id'] as $x)   if (in_array(strtolower($x), $colsLower, true))   { $idCol   = $x; break; }
-                foreach ($c['name'] as $x) if (in_array(strtolower($x), $colsLower, true))   { $nameCol = $x; break; }
-                if ($idCol && $nameCol) return ['table'=>$c['table'],'id'=>$idCol,'name'=>$nameCol];
+                $i = array_search(strtolower($c), $lower, true);
+                if ($i !== false) return $cols[$i];
             }
             return null;
-        }
+        };
+        $tableHas = function(PDO $pdo, string $t): bool {
+            $st = $pdo->prepare("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?");
+            $st->execute([$t]);
+            return (int)$st->fetchColumn() > 0;
+        };
 
+        /* ===== 1) Resolve real subject_group id from quiz group number ===== */
         $RESULT_GROUP_NAME = null;
-        if ($RESULT_GROUP) {
-            if ($meta = pick_group_table($pdo)) {
-                $sql = "SELECT `{$meta['name']}` FROM {$meta['table']} WHERE `{$meta['id']}` = ? LIMIT 1";
-                $st  = $pdo->prepare($sql);
+        $REAL_GROUP_ID = null;
+
+        if ($RESULT_GROUP > 0 && $tableHas($pdo,'subject_groups')) {
+            $sgId = $getCol($pdo,'subject_groups',['group_id','id']);
+            $sgName = $getCol($pdo,'subject_groups',['group_name','name','title','label']);
+
+            // 1.1 ใช้ id ตรง ๆ ก่อน
+            if ($sgId) {
+                $st = $pdo->prepare("SELECT `$sgId` FROM `subject_groups` WHERE `$sgId` = ? LIMIT 1");
                 $st->execute([$RESULT_GROUP]);
+                $REAL_GROUP_ID = $st->fetchColumn() ?: null;
+            }
+
+            // 1.2 ถ้าไม่เจอ id ตรง → map ตาม "ลำดับที่ n" (เช่น กลุ่มที่ 1 = แถวแรกหลัง sort)
+            if (!$REAL_GROUP_ID && $sgId) {
+                $st = $pdo->query("SELECT `$sgId` FROM `subject_groups` ORDER BY `$sgId` ASC");
+                $ids = $st->fetchAll(PDO::FETCH_COLUMN, 0);
+                if (!empty($ids)) {
+                    $index = max(0, min(count($ids)-1, $RESULT_GROUP-1)); // 1→0, 2→1, 3→2
+                    $REAL_GROUP_ID = (int)$ids[$index];
+                }
+            }
+
+            // 1.3 ตั้งชื่อกลุ่ม
+            if ($REAL_GROUP_ID && $sgName) {
+                $st = $pdo->prepare("SELECT `$sgName` FROM `subject_groups` WHERE `$sgId` = ? LIMIT 1");
+                $st->execute([$REAL_GROUP_ID]);
                 $RESULT_GROUP_NAME = $st->fetchColumn() ?: null;
             }
         }
 
-        
         if (!$RESULT_GROUP_NAME && $RESULT_GROUP > 0) {
-            try {
-                $st = $pdo->prepare("SELECT DISTINCT COALESCE(group_name, '') FROM courses WHERE group_id = ? LIMIT 1");
-                $st->execute([$RESULT_GROUP]);
-                $name = $st->fetchColumn();
-                if ($name) $RESULT_GROUP_NAME = $name;
-            } catch (Throwable $e) { /*  */ }
+            $RESULT_GROUP_NAME = 'กลุ่มที่ ' . (int)$RESULT_GROUP;
         }
 
-        // 3.2 ดึงรายวิชาที่แนะนำ
+        /* ===== 2) Pull subjects in the resolved group (flexible schema) ===== */
         $RESULT_SUBJECTS = [];
-        if ($RESULT_GROUP > 0 && table_exists($pdo,'courses')) {
-            $sql = "SELECT course_code, course_name, credits, recommended_year, prereq_text
-                    FROM courses
-                    WHERE group_id = ?
-                    ORDER BY recommended_year IS NULL, recommended_year, course_name";
-            $st = $pdo->prepare($sql);
-            $st->execute([$RESULT_GROUP]);
-            $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($tableHas($pdo,'subjects')) {
+            $subGrpId   = $getCol($pdo,'subjects',['group_id','subject_group_id','grp_id']);          // numeric
+            $subGrpKey  = $getCol($pdo,'subjects',['group_key','group_name','group_label','grp']);    // text
+            $subCode    = $getCol($pdo,'subjects',['subject_code','course_code','code']);
+            $subName    = $getCol($pdo,'subjects',['subject_name','course_name','name','title']);
+            $subCredit  = $getCol($pdo,'subjects',['credits','credit','unit','units']);
+            $subYear    = $getCol($pdo,'subjects',['recommended_year','year','year_recommended']);
+            $subPrereq  = $getCol($pdo,'subjects',['prereq_text','prerequisite','prereq']);
+
+            $selectCols = [];
+            if ($subCode)   $selectCols[] = "`$subCode` AS course_code";
+            if ($subName)   $selectCols[] = "`$subName` AS course_name";
+            if ($subCredit) $selectCols[] = "`$subCredit` AS credits";
+            if ($subYear)   $selectCols[] = "`$subYear` AS recommended_year";
+            if ($subPrereq) $selectCols[] = "`$subPrereq` AS prereq_text";
+            if (!$selectCols && $subName) $selectCols[] = "`$subName` AS course_name"; // อย่างน้อยชื่อ
+
+            $orderBy = [];
+            if ($subYear) { $orderBy[] = "`$subYear` IS NULL"; $orderBy[] = "`$subYear`"; }
+            if ($subName) $orderBy[] = "`$subName`";
+
+            // 2.1 จับคู่ด้วย numeric group_id ก่อน
+            if ($REAL_GROUP_ID && $subGrpId && $selectCols) {
+                $sql = "SELECT ".implode(',', $selectCols)." FROM `subjects` WHERE `$subGrpId` = ?".
+                       ( $orderBy ? " ORDER BY ".implode(',', $orderBy) : "" );
+                $st = $pdo->prepare($sql);
+                $st->execute([$REAL_GROUP_ID]);
+                $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
+            }
+
+            // 2.2 ถ้าไม่มีคอลัมน์ตัวเลข → จับคู่ชื่อกลุ่ม (text join)
+            if (empty($RESULT_SUBJECTS) && !$subGrpId && $subGrpKey && $tableHas($pdo,'subject_groups')) {
+                $sgId   = $getCol($pdo,'subject_groups',['group_id','id']);
+                $sgName = $getCol($pdo,'subject_groups',['group_name','name','title','label']);
+                if ($sgId && $sgName && $selectCols) {
+                    // หา group_name ของ REAL_GROUP_ID (หรือของลำดับที่ n)
+                    $targetName = null;
+                    if ($REAL_GROUP_ID) {
+                        $st = $pdo->prepare("SELECT `$sgName` FROM `subject_groups` WHERE `$sgId`=? LIMIT 1");
+                        $st->execute([$REAL_GROUP_ID]);
+                        $targetName = $st->fetchColumn() ?: null;
+                    }
+                    if (!$targetName) {
+                        // ถ้าไม่ได้ id ให้ใช้ชื่อกลุ่มแรกตามลำดับแทน
+                        $st = $pdo->query("SELECT `$sgName` FROM `subject_groups` ORDER BY `$sgId` ASC LIMIT 1");
+                        $targetName = $st->fetchColumn() ?: null;
+                    }
+
+                    if ($targetName) {
+                        $sql = "SELECT ".implode(',', $selectCols)."
+                                FROM `subjects`
+                                WHERE TRIM(LOWER(`$subGrpKey`)) COLLATE utf8mb4_unicode_ci
+                                   = TRIM(LOWER(?)) COLLATE utf8mb4_unicode_ci
+                                ".( $orderBy ? " ORDER BY ".implode(',', $orderBy) : "" );
+                        $st = $pdo->prepare($sql);
+                        $st->execute([$targetName]);
+                        $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
+                    }
+                }
+            }
+
+            // 2.3 Fallback: group_id = 0 หรือดึงอย่างน้อย 12 รายการ
+            if (empty($RESULT_SUBJECTS)) {
+                if ($subGrpId) {
+                    $sql = "SELECT ".implode(',', $selectCols)."
+                            FROM `subjects`
+                            WHERE `$subGrpId` = 0
+                            ".( $orderBy ? " ORDER BY ".implode(',', $orderBy) : "" );
+                    $st = $pdo->prepare($sql);
+                    $st->execute();
+                    $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
+                }
+                if (empty($RESULT_SUBJECTS)) {
+                    $sql = "SELECT ".implode(',', $selectCols)."
+                            FROM `subjects`
+                            ".( $orderBy ? " ORDER BY ".implode(',', $orderBy) : "" )."
+                            LIMIT 12";
+                    $st = $pdo->prepare($sql);
+                    $st->execute();
+                    $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
+                }
+            }
         }
 
-        // 3.3 Fallback #1: group_id = 0
-        if (empty($RESULT_SUBJECTS) && table_exists($pdo,'courses')) {
-            $sql = "SELECT course_code, course_name, credits, recommended_year, prereq_text
-                    FROM courses
-                    WHERE group_id = 0
-                    ORDER BY recommended_year IS NULL, recommended_year, course_name";
-            $st = $pdo->prepare($sql);
-            $st->execute();
-            $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        // 3.4 Fallback #2: subjects
-        if (empty($RESULT_SUBJECTS) && table_exists($pdo,'subjects')) {
-            $sql = "SELECT course_code, course_name, credits, recommended_year, prereq_text
-                    FROM subjects
-                    WHERE (group_id = ? OR group_id IS NULL)
-                    ORDER BY recommended_year IS NULL, recommended_year, course_name";
-            $st = $pdo->prepare($sql);
-            $st->execute([$RESULT_GROUP]);
-            $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        // 3.5 Fallback #3: all courses
-        if (empty($RESULT_SUBJECTS) && table_exists($pdo,'courses')) {
-            $sql = "SELECT course_code, course_name, credits, recommended_year, prereq_text
-                    FROM courses
-                    ORDER BY recommended_year IS NULL, recommended_year, course_name
-                    LIMIT 12";
-            $st = $pdo->prepare($sql);
-            $st->execute();
-            $RESULT_SUBJECTS = $st->fetchAll(PDO::FETCH_ASSOC);
-        }
-    }catch(PDOException $e){
-        $RESULT_GROUP_NAME=null; $RESULT_SUBJECTS=[];
+    } catch (PDOException $e) {
+        $RESULT_GROUP_NAME = null;
+        $RESULT_SUBJECTS = [];
     }
 
-    // save history
+    // === บันทึกประวัติ (เดิม) ===
     if (empty($_SESSION['final_result_saved']) && !empty($_SESSION['final_result'])) {
         $no_count = (int)($_SESSION['final_result']['no_count'] ?? 0);
         $subjects_text = '';
@@ -661,8 +641,8 @@ if ($SHOW_RESULT) {
             $_SESSION['final_result_saved'] = true;
         }
     }
-
-} elseif (isset($_GET['qid'])) {
+}
+ elseif (isset($_GET['qid'])) {
     $current_qid = max(1, (int)$_GET['qid']);
 
     // ฟังก์ชันดึงคำถามแบบ fallback: question_id -> id
@@ -681,9 +661,8 @@ if ($SHOW_RESULT) {
     if (!$question) { die("ไม่พบคำถาม ID: ".h($current_qid)); }
     $SHOW_QUIZ = true;
 
-
 } else {
-    // ⬅️ FIX: รองรับหน้าเริ่มต้น
+    // ⬅️ หน้าเริ่มต้น
     unset($_SESSION['answers'], $_SESSION['final_result'], $_SESSION['final_result_saved']);
     $SHOW_START = true;
 }
@@ -697,477 +676,77 @@ if ($SHOW_RESULT) {
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 <style>
-    * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-    }
-
-    :root {
-        --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        --success-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-        --warning-gradient: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-        --card-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
-        --card-shadow-hover: 0 30px 60px rgba(0, 0, 0, 0.15);
-        --border-radius: 20px;
-        --border-radius-small: 12px;
-        --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    body {
-        font-family: 'Sarabun', sans-serif;
-        background: var(--primary-gradient);
-        min-height: 100vh;
-        padding: 20px;
-        line-height: 1.6;
-    }
-
-    .container {
-        max-width: 900px;
-        margin: 0 auto;
-        position: relative;
-    }
-
-    .quiz-card {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(20px);
-        border-radius: var(--border-radius);
-        padding: 40px;
-        box-shadow: var(--card-shadow);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        transition: var(--transition);
-        position: relative;
-        overflow: hidden;
-    }
-
-    .quiz-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 6px;
-        background: var(--primary-gradient);
-    }
-
-    .quiz-card:hover {
-        transform: translateY(-5px);
-        box-shadow: var(--card-shadow-hover);
-    }
-
-    /* Header Styles */
-    .quiz-header {
-        text-align: center;
-        margin-bottom: 40px;
-    }
-
-    .quiz-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1f2937;
-        margin-bottom: 16px;
-        background: var(--primary-gradient);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-
-    .student-info {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        background: linear-gradient(135deg, #f3f4f6, #e5e7eb);
-        padding: 12px 20px;
-        border-radius: 25px;
-        font-weight: 600;
-        color: #374151;
-        margin-bottom: 20px;
-    }
-
-    .student-info i {
-        color: #3b82f6;
-    }
-
-    /* Status Pills */
-    .status-container {
-        display: flex;
-        gap: 12px;
-        justify-content: center;
-        flex-wrap: wrap;
-        margin-bottom: 32px;
-    }
-
-    .status-pill {
-        background: linear-gradient(135deg, #f8fafc, #e2e8f0);
-        padding: 10px 18px;
-        border-radius: 25px;
-        font-size: 0.9rem;
-        font-weight: 500;
-        color: #475569;
-        border: 1px solid rgba(0, 0, 0, 0.08);
-        transition: var(--transition);
-        position: relative;
-    }
-
-    .status-pill:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
-    }
-
-    .status-pill.active {
-        background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-        color: #1d4ed8;
-        border-color: #3b82f6;
-    }
-
-    .status-pill.warning {
-        background: linear-gradient(135deg, #fef3c7, #fde68a);
-        color: #92400e;
-        border-color: #f59e0b;
-    }
-
-    /* Button Styles */
-    .btn-container {
-        text-align: center;
-        margin-top: 32px;
-    }
-
-    .btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        padding: 16px 32px;
-        border: none;
-        border-radius: var(--border-radius-small);
-        font-size: 1.1rem;
-        font-weight: 600;
-        text-decoration: none;
-        cursor: pointer;
-        transition: var(--transition);
-        position: relative;
-        overflow: hidden;
-        margin: 0 8px;
-    }
-
-    .btn::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-        transition: var(--transition);
-    }
-
-    .btn:hover::before {
-        left: 100%;
-    }
-
-    .btn-primary {
-        background: var(--primary-gradient);
-        color: white;
-        box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
-    }
-
-    .btn-primary:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 12px 30px rgba(102, 126, 234, 0.4);
-    }
-
-    .btn-success {
-        background: var(--success-gradient);
-        color: white;
-        box-shadow: 0 8px 20px rgba(79, 172, 254, 0.3);
-    }
-
-    .btn-success:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 12px 30px rgba(79, 172, 254, 0.4);
-    }
-
-    .btn-outline {
-        background: rgba(255, 255, 255, 0.9);
-        border: 2px solid #e2e8f0;
-        color: #475569;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
-    }
-
-    .btn-outline:hover {
-        background: white;
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.12);
-        border-color: #cbd5e1;
-    }
-
-    .btn-warning {
-        background: var(--warning-gradient);
-        color: white;
-        box-shadow: 0 8px 20px rgba(250, 112, 154, 0.3);
-    }
-
-    .btn-warning:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 12px 30px rgba(250, 112, 154, 0.4);
-    }
-
-    /* Question Styles */
-    .question-container {
-        margin-bottom: 40px;
-    }
-
-    .question-number {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        background: var(--primary-gradient);
-        color: white;
-        padding: 8px 16px;
-        border-radius: 25px;
-        font-weight: 600;
-        margin-bottom: 20px;
-        font-size: 1rem;
-    }
-
-    .question-text {
-        font-size: 1.3rem;
-        font-weight: 500;
-        color: #374151;
-        line-height: 1.7;
-        margin-bottom: 32px;
-        padding: 24px;
-        background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-        border-radius: var(--border-radius-small);
-        border-left: 5px solid #3b82f6;
-    }
-
-    /* Radio Button Styles */
-    .answer-options {
-        display: flex;
-        gap: 20px;
-        justify-content: center;
-        flex-wrap: wrap;
-        margin-bottom: 40px;
-    }
-
-    .radio-option {
-        position: relative;
-    }
-
-    .radio-option input[type="radio"] {
-        position: absolute;
-        opacity: 0;
-        width: 0;
-        height: 0;
-    }
-
-    .radio-label {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 16px 28px;
-        background: rgba(255, 255, 255, 0.9);
-        border: 2px solid #e2e8f0;
-        border-radius: var(--border-radius-small);
-        cursor: pointer;
-        transition: var(--transition);
-        font-size: 1.1rem;
-        font-weight: 500;
-        color: #475569;
-        min-width: 140px;
-        justify-content: center;
-    }
-
-    .radio-label:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
-        border-color: #3b82f6;
-    }
-
-    .radio-option input[type="radio"]:checked + .radio-label {
-        background: var(--primary-gradient);
-        color: white;
-        border-color: #3b82f6;
-        transform: translateY(-3px);
-        box-shadow: 0 12px 25px rgba(59, 130, 246, 0.3);
-    }
-
-    .radio-icon {
-        width: 20px;
-        height: 20px;
-        border: 2px solid currentColor;
-        border-radius: 50%;
-        position: relative;
-        flex-shrink: 0;
-    }
-
-    .radio-option input[type="radio"]:checked + .radio-label .radio-icon::after {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 8px;
-        height: 8px;
-        background: white;
-        border-radius: 50%;
-        transform: translate(-50%, -50%);
-    }
-
-    /* Result Styles */
-    .result-container {
-        text-align: center;
-    }
-
-    .result-header {
-        margin-bottom: 32px;
-    }
-
-    .result-title {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #1f2937;
-        margin-bottom: 20px;
-    }
-
-    .result-group {
-        background: var(--success-gradient);
-        color: white;
-        padding: 16px 32px;
-        border-radius: 25px;
-        font-size: 1.3rem;
-        font-weight: 700;
-        display: inline-block;
-        margin-bottom: 32px;
-        box-shadow: 0 8px 20px rgba(79, 172, 254, 0.3);
-    }
-
-    .subjects-container {
-        background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-        padding: 30px;
-        border-radius: var(--border-radius-small);
-        margin-bottom: 32px;
-        text-align: left;
-    }
-
-    .subjects-title {
-        font-size: 1.4rem;
-        font-weight: 600;
-        color: #374151;
-        margin-bottom: 20px;
-        text-align: center;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-    }
-
-    .subjects-list {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 12px;
-        list-style: none;
-    }
-
-    .subject-item {
-        background: white;
-        padding: 12px 16px;
-        border-radius: 8px;
-        border-left: 4px solid #3b82f6;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-        transition: var(--transition);
-    }
-
-    .subject-item:hover {
-        transform: translateX(5px);
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-    }
-
-    /* Responsive Design */
-    @media (max-width: 768px) {
-        .container {
-            padding: 10px;
-        }
-        
-        .quiz-card {
-            padding: 24px;
-            margin: 10px 0;
-        }
-        
-        .quiz-title {
-            font-size: 1.8rem;
-        }
-        
-        .status-container {
-            flex-direction: column;
-            align-items: center;
-        }
-        
-        .answer-options {
-            flex-direction: column;
-            align-items: center;
-        }
-        
-        .radio-label {
-            min-width: 200px;
-        }
-        
-        .btn {
-            width: 100%;
-            max-width: 300px;
-            margin: 8px 0;
-        }
-        
-        .subjects-list {
-            grid-template-columns: 1fr;
-        }
-    }
-
-    /* Animation */
-    @keyframes fadeInUp {
-        from {
-            opacity: 0;
-            transform: translateY(30px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-
-    .quiz-card {
-        animation: fadeInUp 0.6s ease-out;
-    }
-
-    /* Loading Animation */
-    .loading {
-        display: inline-block;
-        width: 20px;
-        height: 20px;
-        border: 3px solid rgba(255, 255, 255, 0.3);
-        border-radius: 50%;
-        border-top-color: #fff;
-        animation: spin 1s ease-in-out infinite;
-    }
-
-    @keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-
-    /* Success Checkmark */
-    .success-icon {
-        color: #10b981;
-        font-size: 1.2em;
-    }
-
-    .warning-icon {
-        color: #f59e0b;
-        font-size: 1.2em;
-    }
-
-    .info-icon {
-        color: #3b82f6;
-        font-size: 1.2em;
-    }
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --primary-gradient:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+  --success-gradient:linear-gradient(135deg,#4facfe 0%,#00f2fe 100%);
+  --warning-gradient:linear-gradient(135deg,#fa709a 0%,#fee140 100%);
+  --card-shadow:0 20px 40px rgba(0,0,0,.1);
+  --card-shadow-hover:0 30px 60px rgba(0,0,0,.15);
+  --border-radius:20px; --border-radius-small:12px; --transition:all .3s cubic-bezier(.4,0,.2,1)
+}
+body{font-family:'Sarabun',sans-serif;background:var(--primary-gradient);min-height:100vh;padding:20px;line-height:1.6}
+.container{max-width:900px;margin:0 auto;position:relative}
+.quiz-card{background:rgba(255,255,255,.95);backdrop-filter:blur(20px);border-radius:var(--border-radius);padding:40px;box-shadow:var(--card-shadow);border:1px solid rgba(255,255,255,.2);transition:var(--transition);position:relative;overflow:hidden;animation:fadeInUp .6s ease-out}
+.quiz-card::before{content:'';position:absolute;top:0;left:0;right:0;height:6px;background:var(--primary-gradient)}
+.quiz-card:hover{transform:translateY(-5px);box-shadow:var(--card-shadow-hover)}
+.quiz-header{text-align:center;margin-bottom:40px}
+.quiz-title{font-size:2.2rem;font-weight:700;color:#1f2937;margin-bottom:16px;background:var(--primary-gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.student-info{display:inline-flex;align-items:center;gap:8px;background:linear-gradient(135deg,#f3f4f6,#e5e7eb);padding:12px 20px;border-radius:25px;font-weight:600;color:#374151;margin-bottom:20px}
+.student-info i{color:#3b82f6}
+.status-container{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:32px}
+.status-pill{background:linear-gradient(135deg,#f8fafc,#e2e8f0);padding:10px 18px;border-radius:25px;font-size:.9rem;font-weight:500;color:#475569;border:1px solid rgba(0,0,0,.08);transition:var(--transition);position:relative}
+.status-pill:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.1)}
+.status-pill.active{background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#1d4ed8;border-color:#3b82f6}
+.status-pill.warning{background:linear-gradient(135deg,#fef3c7,#fde68a);color:#92400e;border-color:#f59e0b}
+.btn-container{text-align:center;margin-top:32px}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:16px 32px;border:none;border-radius:var(--border-radius-small);font-size:1.1rem;font-weight:600;text-decoration:none;cursor:pointer;transition:var(--transition);position:relative;overflow:hidden;margin:0 8px}
+.btn::before{content:'';position:absolute;top:0;left:-100%;width:100%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.2),transparent);transition:var(--transition)}
+.btn:hover::before{left:100%}
+.btn-primary{background:var(--primary-gradient);color:#fff;box-shadow:0 8px 20px rgba(102,126,234,.3)}
+.btn-primary:hover{transform:translateY(-3px);box-shadow:0 12px 30px rgba(102,126,234,.4)}
+.btn-success{background:var(--success-gradient);color:#fff;box-shadow:0 8px 20px rgba(79,172,254,.3)}
+.btn-success:hover{transform:translateY(-3px);box-shadow:0 12px 30px rgba(79,172,254,.4)}
+.btn-outline{background:rgba(255,255,255,.9);border:2px solid #e2e8f0;color:#475569;box-shadow:0 4px 15px rgba(0,0,0,.08)}
+.btn-outline:hover{background:#fff;transform:translateY(-2px);box-shadow:0 8px 25px rgba(0,0,0,.12);border-color:#cbd5e1}
+.btn-warning{background:var(--warning-gradient);color:#fff;box-shadow:0 8px 20px rgba(250,112,154,.3)}
+.btn-warning:hover{transform:translateY(-3px);box-shadow:0 12px 30px rgba(250,112,154,.4)}
+.question-container{margin-bottom:40px}
+.question-number{display:inline-flex;align-items:center;gap:8px;background:var(--primary-gradient);color:#fff;padding:8px 16px;border-radius:25px;font-weight:600;margin-bottom:20px;font-size:1rem}
+.question-text{font-size:1.3rem;font-weight:500;color:#374151;line-height:1.7;margin-bottom:32px;padding:24px;background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:var(--border-radius-small);border-left:5px solid #3b82f6}
+.answer-options{display:flex;gap:20px;justify-content:center;flex-wrap:wrap;margin-bottom:40px}
+.radio-option{position:relative}
+.radio-option input[type="radio"]{position:absolute;opacity:0;width:0;height:0}
+.radio-label{display:flex;align-items:center;gap:12px;padding:16px 28px;background:rgba(255,255,255,.9);border:2px solid #e2e8f0;border-radius:var(--border-radius-small);cursor:pointer;transition:var(--transition);font-size:1.1rem;font-weight:500;color:#475569;min-width:140px;justify-content:center}
+.radio-label:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.1);border-color:#3b82f6}
+.radio-option input[type="radio"]:checked + .radio-label{background:var(--primary-gradient);color:#fff;border-color:#3b82f6;transform:translateY(-3px);box-shadow:0 12px 25px rgba(59,130,246,.3)}
+.radio-icon{width:20px;height:20px;border:2px solid currentColor;border-radius:50%;position:relative;flex-shrink:0}
+.radio-option input[type="radio"]:checked + .radio-label .radio-icon::after{content:'';position:absolute;top:50%;left:50%;width:8px;height:8px;background:#fff;border-radius:50%;transform:translate(-50%,-50%)}
+.result-container{text-align:center}
+.result-header{margin-bottom:32px}
+.result-title{font-size:2rem;font-weight:700;color:#1f2937;margin-bottom:20px}
+.result-group{background:var(--success-gradient);color:#fff;padding:16px 32px;border-radius:25px;font-size:1.3rem;font-weight:700;display:inline-block;margin-bottom:32px;box-shadow:0 8px 20px rgba(79,172,254,.3)}
+.subjects-container{background:linear-gradient(135deg,#f8fafc,#f1f5f9);padding:30px;border-radius:var(--border-radius-small);margin-bottom:32px;text-align:left}
+.subjects-title{font-size:1.4rem;font-weight:600;color:#374151;margin-bottom:20px;text-align:center;display:flex;align-items:center;justify-content:center;gap:8px}
+.subjects-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;list-style:none}
+.subject-item{background:#fff;padding:12px 16px;border-radius:8px;border-left:4px solid #3b82f6;box-shadow:0 2px 8px rgba(0,0,0,.05);transition:var(--transition)}
+.subject-item:hover{transform:translateX(5px);box-shadow:0 4px 15px rgba(0,0,0,.1)}
+@media (max-width:768px){
+ .container{padding:10px}
+ .quiz-card{padding:24px;margin:10px 0}
+ .quiz-title{font-size:1.8rem}
+ .status-container{flex-direction:column;align-items:center}
+ .answer-options{flex-direction:column;align-items:center}
+ .radio-label{min-width:200px}
+ .btn{width:100%;max-width:300px;margin:8px 0}
+ .subjects-list{grid-template-columns:1fr}
+}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(30px)}to{opacity:1;transform:translateY(0)}}
+.loading{display:inline-block;width:20px;height:20px;border:3px solid rgba(255,255,255,.3);border-radius:50%;border-top-color:#fff;animation:spin 1s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.success-icon{color:#10b981;font-size:1.2em}
+.warning-icon{color:#f59e0b;font-size:1.2em}
+.info-icon{color:#3b82f6;font-size:1.2em}
 </style>
 </head>
 <body>
@@ -1210,9 +789,9 @@ if ($SHOW_RESULT) {
           ยกเลิก
         </a>
       <?php else: ?>
-        <div style="margin-bottom: 24px; padding: 20px; background: linear-gradient(135deg, #fee2e2, #fecaca); border-radius: 12px; color: #dc2626;">
-          <i class="fas fa-exclamation-triangle" style="font-size: 1.5rem; margin-bottom: 8px;"></i>
-          <p style="font-weight: 600; margin: 0;">
+        <div style="margin-bottom:24px;padding:20px;background:linear-gradient(135deg,#fee2e2,#fecaca);border-radius:12px;color:#dc2626;">
+          <i class="fas fa-exclamation-triangle" style="font-size:1.5rem;margin-bottom:8px;"></i>
+          <p style="font-weight:600;margin:0;">
             <strong>ไม่สามารถเริ่มทำได้:</strong><br>
             <?= ($policy['status']==='suspended')
                ? 'สถานะถูกระงับสิทธิ์ โปรดติดต่อผู้ดูแลระบบ'
