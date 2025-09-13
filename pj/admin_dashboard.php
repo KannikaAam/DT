@@ -8,16 +8,32 @@ $admin_username = $_SESSION['admin_username'] ?? $_SESSION['username'] ?? 'Admin
 require 'db_connect.php'; // ให้ตัวแปร $pdo พร้อมใช้งาน (PDO)
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-/* -------------------------- AJAX: quiz_stats -------------------------- */
+/* -------------------------- helpers: schema detection -------------------------- */
+function hasColumn(PDO $pdo, string $table, string $col): bool {
+    $st = $pdo->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS
+                         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+    $st->execute([$table,$col]);
+    return (int)$st->fetchColumn() > 0;
+}
+function firstExisting(PDO $pdo, string $table, array $candidates) {
+    foreach ($candidates as $c) {
+        if (hasColumn($pdo, $table, $c)) return $c;
+    }
+    return null;
+}
+function tableExists(PDO $pdo, string $table): bool {
+    $st = $pdo->prepare("SELECT COUNT(*) FROM information_schema.TABLES
+                         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $st->execute([$table]);
+    return (int)$st->fetchColumn() > 0;
+}
+
+/* -------------------------- AJAX: quiz_stats (เดิม) -------------------------- */
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'quiz_stats') {
     header('Content-Type: application/json; charset=utf-8');
 
-    // นับนักศึกษาทั้งหมดจาก education_info (ผูกกับ personal_info)
-    $total_students = (int)$pdo->query("
-        SELECT COUNT(*) FROM education_info
-    ")->fetchColumn();
+    $total_students = (int)$pdo->query("SELECT COUNT(*) FROM education_info")->fetchColumn();
 
-    // ตารางสถานะแบบทดสอบ (student_quiz_status) อาจยังไม่มีทุกคน ให้ LEFT JOIN เพื่อคำนวณ
     $sql = "
         SELECT
           SUM(CASE WHEN COALESCE(sqs.quiz_attempts,0) > 0 THEN 1 ELSE 0 END) AS did_quiz,
@@ -39,6 +55,90 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'quiz_stats') {
             'admin_override' => (int)$row['admin_override'],
         ]
     ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/* -------------------------- NEW: AJAX group_popularity -------------------------- */
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'group_popularity') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    // ตารางและคอลัมน์ที่เป็นไปได้
+    $resultTables = ['quiz_results','test_history','results','quiz_summary'];
+    $groupsTable  = tableExists($pdo,'subject_groups') ? 'subject_groups' : (tableExists($pdo,'groups') ? 'groups' : null);
+
+    if (!$groupsTable) {
+        echo json_encode(['ok'=>false,'error'=>'ไม่พบตาราง subject_groups / groups']); exit;
+    }
+
+    // เลือกตารางผลลัพธ์ที่มีอยู่จริงอันแรก
+    $resultTable = null;
+    foreach ($resultTables as $t) { if (tableExists($pdo,$t)) { $resultTable = $t; break; } }
+
+    if (!$resultTable) {
+        echo json_encode(['ok'=>true,'labels'=>[],'top1'=>[],'top2'=>[],'top3'=>[]]); exit;
+    }
+
+    // เดาชื่อคอลัมน์ group_id อันดับ 1/2/3
+    $colTop1 = firstExisting($pdo,$resultTable, ['top1_group_id','best_group_id','recommended_group_id','result_group_id','predicted_group_id','group_id']);
+    $colTop2 = firstExisting($pdo,$resultTable, ['top2_group_id','second_group_id']);
+    $colTop3 = firstExisting($pdo,$resultTable, ['top3_group_id','third_group_id']);
+
+    // ถ้ามีแค่ group_id เดี่ยวๆ อาจเป็นหลายแถวต่อ นศ. ให้ถือว่าเป็น Top1 เท่าที่มี (fallback)
+    // NOTE: โครงสร้างนี้จะไม่นับ Top2/Top3
+    $sqlParts = [];
+    $params   = [];
+
+    if ($colTop1) {
+        $sqlParts[] = "SELECT 1 AS rk, $colTop1 AS gid FROM `$resultTable` WHERE $colTop1 IS NOT NULL";
+    }
+    if ($colTop2) {
+        $sqlParts[] = "SELECT 2 AS rk, $colTop2 AS gid FROM `$resultTable` WHERE $colTop2 IS NOT NULL";
+    }
+    if ($colTop3) {
+        $sqlParts[] = "SELECT 3 AS rk, $colTop3 AS gid FROM `$resultTable` WHERE $colTop3 IS NOT NULL";
+    }
+
+    // ถ้าไม่มีสักอัน แต่มีคอลัมน์ group_id เดียว
+    if (!$sqlParts) {
+        if (hasColumn($pdo,$resultTable,'group_id')) {
+            $sqlParts[] = "SELECT 1 AS rk, group_id AS gid FROM `$resultTable` WHERE group_id IS NOT NULL";
+        } else {
+            echo json_encode(['ok'=>true,'labels'=>[],'top1'=>[],'top2'=>[],'top3'=>[]]); exit;
+        }
+    }
+
+    $unionSql = implode(" UNION ALL ", $sqlParts);
+
+    // รวม-นับ แล้วต่อชื่อกลุ่ม
+    $finalSql = "
+        WITH u AS ($unionSql)
+        SELECT g.group_name, 
+               SUM(CASE WHEN u.rk=1 THEN 1 ELSE 0 END) AS c1,
+               SUM(CASE WHEN u.rk=2 THEN 1 ELSE 0 END) AS c2,
+               SUM(CASE WHEN u.rk=3 THEN 1 ELSE 0 END) AS c3,
+               (SUM(CASE WHEN u.rk=1 THEN 1 ELSE 0 END)
+                +SUM(CASE WHEN u.rk=2 THEN 1 ELSE 0 END)
+                +SUM(CASE WHEN u.rk=3 THEN 1 ELSE 0 END)) AS total_c
+        FROM u
+        INNER JOIN `$groupsTable` g ON g.group_id = u.gid
+        GROUP BY g.group_id, g.group_name
+        ORDER BY total_c DESC, g.group_name ASC
+        LIMIT 12
+    ";
+
+    try {
+        $rows = $pdo->query($finalSql)->fetchAll(PDO::FETCH_ASSOC);
+        $labels = []; $top1=[]; $top2=[]; $top3=[];
+        foreach ($rows as $r) {
+            $labels[] = (string)($r['group_name'] ?? 'ไม่ทราบชื่อ');
+            $top1[] = (int)$r['c1'];
+            $top2[] = (int)$r['c2'];
+            $top3[] = (int)$r['c3'];
+        }
+        echo json_encode(['ok'=>true,'labels'=>$labels,'top1'=>$top1,'top2'=>$top2,'top3'=>$top3], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
     exit;
 }
 ?>
@@ -105,7 +205,7 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
 .chart-btn{background-color:var(--secondary-dark);color:var(--text-secondary);border:1px solid var(--border-color);
   padding:8px 14px;border-radius:8px;cursor:pointer;font-size:.9rem;font-weight:600;transition:.2s}
 .chart-btn.active,.chart-btn:hover{color:#0b1220;background:linear-gradient(135deg,var(--accent-cyan),var(--accent-purple));border-color:transparent}
-.chart-container{position:relative;height:380px}
+.chart-container{position:relative;height:420px}
 .action-buttons{display:flex;flex-direction:column;gap:.8rem}
 .action-btn{background-color:var(--primary-dark);color:var(--accent-cyan);border:1px solid var(--border-color);
   padding:12px 16px;border-radius:10px;cursor:pointer;font-size:.95rem;font-weight:700;display:flex;align-items:center;gap:10px;transition:.2s;text-align:left}
@@ -120,7 +220,7 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
 @media (max-width: 768px){
   .header-content{flex-direction:column;gap:1rem}
   .container{padding:0 1rem;margin-top:1rem}
-  .chart-container{height:320px}
+  .chart-container{height:360px}
 }
 </style>
 </head>
@@ -142,7 +242,6 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
   <!-- Stats -->
   <section class="stats-section">
     <div class="stats-grid" id="topStats">
-      <!-- จะถูกเติมด้วย JS ตามข้อมูลจริง -->
       <div class="stat-card"><div class="stat-icon"><i class="fas fa-user-graduate"></i></div>
         <div class="stat-info"><div class="stat-number" id="stTotal">-</div><div class="stat-label">นักศึกษาทั้งหมด</div></div></div>
       <div class="stat-card"><div class="stat-icon"><i class="fas fa-check-circle"></i></div>
@@ -165,22 +264,22 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
       <a href="teacher_registration.php" class="nav-card"><i class="fas fa-chalkboard-teacher nav-icon"></i><div><h3>จัดการข้อมูลอาจารย์</h3><p>เพิ่ม/แก้ไข/รีเซ็ตรหัสผ่าน</p></div></a>
       <a href="groups_manage.php" class="nav-card"><i class="fas fa-people-group nav-icon"></i><div><h3>จัดการกลุ่มเรียน</h3><p>เพิ่ม/แก้ไข กลุ่มการเรียน</p></div></a>
       <a href="students_list.php" class="nav-card">
-  <i class="fas fa-users nav-icon"></i>
-  <div>
-    <h3>รายชื่อนักศึกษาทั้งระบบ</h3>
-    <p>ดูภาพรวม ค้นหา กรอง และส่งออกรายชื่อนักศึกษา</p>
-  </div>
-</a>
-
+        <i class="fas fa-users nav-icon"></i>
+        <div>
+          <h3>รายชื่อนักศึกษาทั้งระบบ</h3>
+          <p>ดูภาพรวม ค้นหา กรอง และส่งออกรายชื่อนักศึกษา</p>
+        </div>
+      </a>
     </div>
   </section>
 
   <div class="bottom-grid">
-    <!-- Doughnut Chart -->
+    <!-- Chart -->
     <section class="chart-section card">
-      <h2 class="section-title">สถิติการทำแบบทดสอบ (ชาร์ตวงกลม)</h2>
+      <h2 class="section-title">สถิติการทำแบบทดสอบ & ความนิยมกลุ่ม</h2>
       <div class="chart-controls">
         <button class="chart-btn active" id="btnQuiz">สถานะการทำแบบทดสอบ</button>
+        <button class="chart-btn" id="btnPopularity">ความนิยมกลุ่ม</button>
       </div>
       <div class="chart-container">
         <canvas id="statsChart"></canvas>
@@ -193,8 +292,6 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
       <div class="action-buttons">
         <button class="action-btn" onclick="addNewQuestion()"><i class="fas fa-plus-circle"></i> เพิ่มคำถามใหม่</button>
         <button class="action-btn" onclick="addNewGroup()"><i class="fas fa-folder-plus"></i> เพิ่มกลุ่มใหม่</button>
-        <button class="action-btn" onclick="viewReports()"><i class="fas fa-chart-pie"></i> ดูรายงาน</button>
-        <button class="action-btn" onclick="backupData()"><i class="fas fa-database"></i> สำรองข้อมูล</button>
       </div>
     </section>
   </div>
@@ -204,29 +301,32 @@ body{font-family:'Sarabun',sans-serif;background-color:var(--background-dark);co
 
 <script>
 let statsChart;
+const ctx = document.getElementById('statsChart').getContext('2d');
+const btnQuiz = document.getElementById('btnQuiz');
+const btnPopularity = document.getElementById('btnPopularity');
 
-/* วาด Doughnut chart จากข้อมูลจริง */
+function setActive(btn){
+  document.querySelectorAll('.chart-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+/* ---- Quiz status (doughnut) ---- */
 async function fetchQuizStats(){
   const res = await fetch('?ajax=quiz_stats', {cache:'no-store'});
   const json = await res.json();
   if(!json.ok) throw new Error('โหลดสถิติล้มเหลว');
   return json.stats;
 }
-
 function renderTopStats(s){
   document.getElementById('stTotal').textContent = s.total;
   document.getElementById('stDid').textContent   = s.did_quiz;
   document.getElementById('stNot').textContent   = s.not_quiz;
   document.getElementById('stRecOk').textContent = s.recommended_ok;
 }
-
 function drawDoughnut(stats){
-  const ctx = document.getElementById('statsChart').getContext('2d');
   if (statsChart) statsChart.destroy();
-
   const labels = ['เคยทำแบบทดสอบ','ยังไม่ทำ','แนะนำสำเร็จ ≥1','ให้สิทธิ์เพิ่ม (แอดมิน)'];
   const data   = [stats.did_quiz, stats.not_quiz, stats.recommended_ok, stats.admin_override];
-
   statsChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
@@ -234,7 +334,6 @@ function drawDoughnut(stats){
       datasets: [{
         label: 'สถานะการทำแบบทดสอบ',
         data,
-        // ใช้สีที่เข้ากับธีม — ไม่ต้องกำหนดสไตล์เพิ่มก็สวย (Chart.js 3)
         backgroundColor: ['#22d3ee','#9CA3AF','#10b981','#a78bfa'],
         borderColor: '#111827',
         borderWidth: 2
@@ -251,19 +350,66 @@ function drawDoughnut(stats){
   });
 }
 
+/* ---- Group popularity (bar, Top1/2/3) ---- */
+async function fetchGroupPopularity(){
+  const res = await fetch('?ajax=group_popularity', {cache:'no-store'});
+  const json = await res.json();
+  if(!json.ok) throw new Error(json.error || 'โหลดความนิยมนกลุ่มล้มเหลว');
+  return json;
+}
+function drawPopularity(pop){
+  if (statsChart) statsChart.destroy();
+  const dataSets = [];
+  // แสดงเฉพาะชุดที่มีข้อมูลจริง
+  if (pop.top1 && pop.top1.some(v=>v>0)) dataSets.push({label:'Top 1', data: pop.top1, backgroundColor:'#22d3ee', borderColor:'#111827', borderWidth:1});
+  if (pop.top2 && pop.top2.some(v=>v>0)) dataSets.push({label:'Top 2', data: pop.top2, backgroundColor:'#a78bfa', borderColor:'#111827', borderWidth:1});
+  if (pop.top3 && pop.top3.some(v=>v>0)) dataSets.push({label:'Top 3', data: pop.top3, backgroundColor:'#10b981', borderColor:'#111827', borderWidth:1});
+
+  statsChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: pop.labels, datasets: dataSets },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{position:'bottom', labels:{color:'var(--text-secondary)'}},
+        tooltip:{enabled:true}
+      },
+      scales:{
+        x:{ ticks:{ color:'var(--text-secondary)' }, grid:{ color:'rgba(156,163,175,.2)'} },
+        y:{ beginAtZero:true, ticks:{ color:'var(--text-secondary)' }, grid:{ color:'rgba(156,163,175,.2)'} }
+      }
+    }
+  });
+}
+
+/* ---- Actions ---- */
 function addNewQuestion(){ window.location.href = 'manage_questions.php?action=add'; }
 function addNewGroup(){ window.location.href = 'manage_recommended_groups.php?action=add'; }
-function viewReports(){ alert('ฟีเจอร์รายงานกำลังพัฒนา'); }
-function backupData(){ if (confirm('คุณต้องการสำรองข้อมูลระบบหรือไม่?')) alert('กำลังสำรองข้อมูล...'); }
 
+/* ---- Init ---- */
 document.addEventListener('DOMContentLoaded', async () => {
   try{
+    // โหลดสถิติสรุปบนการ์ด + กราฟสถานะเป็นค่าเริ่มต้น
     const s = await fetchQuizStats();
     renderTopStats(s);
     drawDoughnut(s);
-  }catch(e){
-    console.error(e);
-  }
+  }catch(e){ console.error(e); }
+});
+
+btnQuiz.addEventListener('click', async ()=>{
+  try{
+    setActive(btnQuiz);
+    const s = await fetchQuizStats();
+    drawDoughnut(s);
+  }catch(e){ console.error(e); }
+});
+
+btnPopularity.addEventListener('click', async ()=>{
+  try{
+    setActive(btnPopularity);
+    const pop = await fetchGroupPopularity();
+    drawPopularity(pop);
+  }catch(e){ console.error(e); alert('ยังไม่มีข้อมูลเพียงพอสำหรับความนิยมนกลุ่ม (Top1/2/3)'); }
 });
 </script>
 </body>

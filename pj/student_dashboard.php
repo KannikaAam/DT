@@ -187,7 +187,7 @@ if (!empty($student_data['profile_picture']) && file_exists('uploads/profile_ima
 <title>หน้าหลักนักศึกษา</title>
 <style>
 :root{--primary:#3498db;--secondary:#2980b9;--accent:#f39c12;--success:#27ae60;--text:#333;--radius:8px;--shadow:0 4px 6px rgba(0,0,0,.1)}
-*{margin:0;padding:0;box-sizing:border-box;font-family:'Prompt','Kanit',sans-serif}
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Prompt',sans-serif}
 body{background:#f5f7fa;color:var(--text);line-height:1.6}
 .navbar{background:var(--primary);padding:15px 30px;color:#fff;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 4px rgba(0,0,0,.1)}
 .navbar-brand{font-size:20px;font-weight:bold}
@@ -226,7 +226,7 @@ body{background:#f5f7fa;color:var(--text);line-height:1.6}
 </head>
 <body>
     <div class="navbar">
-        <div class="navbar-brand">ระบบทะเบียนนักศึกษา</div>
+        <div class="navbar-brand">ระบบแนะนำวิชาชีพเลือกด้วยต้นไม้ตัดสินใจ</div>
         <div class="navbar-user">
             <div class="user-info">
                 <div class="user-name"><?= htmlspecialchars($full_name) ?></div>

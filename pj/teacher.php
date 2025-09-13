@@ -1,5 +1,5 @@
 <?php 
-// teacher.php — Dashboard อาจารย์ + เปลี่ยนรหัสผ่าน + โปรไฟล์ + กลุ่ม/นักศึกษา + ผลกลุ่มจากแบบทดสอบ (ไม่แสดงคะแนน)
+// teacher.php — Dashboard อาจารย์ + เปลี่ยนรหัสผ่าน + โปรไฟล์ + กลุ่ม/นักศึกษา + ผลกลุ่มจากแบบทดสอบ (แสดงทุกครั้งที่ทำ)
 session_start();
 
 if (empty($_SESSION['loggedin']) || (($_SESSION['user_type'] ?? '') !== 'teacher')) {
@@ -225,33 +225,80 @@ if($selectedGroupId){
         }
     }
 
-    /* =========== ผลจาก test_history =========== 
-         schema ที่มี: username, timestamp, recommended_group, recommended_subjects
+    /* =========== ผลจาก test_history (แสดงทุกครั้งที่ทำ) =========== 
+         schema: username, timestamp, recommended_group, recommended_subjects
     */
-    $studentOutcome=[]; $idsRaw=[]; $idsNorm=[];
-    foreach($students as $row){ foreach(['student_id','student_code','email'] as $k){ if(!empty($row[$k])){ $v=(string)$row[$k]; $idsRaw[]=$v; $idsNorm[]=norm_id($v); } } }
+    $studentAttempts = []; // sid => [ {group_name, time, courses[]}, ... ]
+    $idsRaw=[]; $idsNorm=[];
+    foreach($students as $row){
+        foreach(['student_id','student_code','email'] as $k){
+            if(!empty($row[$k])){ $v=(string)$row[$k]; $idsRaw[]=$v; $idsNorm[]=norm_id($v); }
+        }
+    }
     $idsRaw=array_values(array_unique(array_map('strval',$idsRaw)));
     $idsNorm=array_values(array_unique(array_map('strval',$idsNorm)));
 
     if(tableExists($conn,'test_history') && ($idsRaw || $idsNorm)){
-        $phR=implode(',',array_fill(0,count($idsRaw),'?')); $phN=implode(',',array_fill(0,count($idsNorm),'?'));
-        $tR=str_repeat('s',count($idsRaw)); $tN=str_repeat('s',count($idsNorm));
-        $condR = $idsRaw? "CAST(username AS CHAR) IN ($phR)" : "0";
-        $condN = $idsNorm? "REPLACE(REPLACE(REPLACE(CAST(username AS CHAR),' ','') ,'-',''),'_','') IN ($phN)" : "0";
+        $phR=implode(',',array_fill(0,count($idsRaw),'?'));  $tR=str_repeat('s',count($idsRaw));
+        $phN=implode(',',array_fill(0,count($idsNorm),'?')); $tN=str_repeat('s',count($idsNorm));
+
+        $condR = $idsRaw? "CAST(h.username AS CHAR) IN ($phR)" : "0";
+        $condN = $idsNorm? "REPLACE(REPLACE(REPLACE(CAST(h.username AS CHAR),' ','') ,'-',''),'_','') IN ($phN)" : "0";
+
         $sql="SELECT CAST(h.username AS CHAR) sid, h.recommended_group gname, h.recommended_subjects subjects, h.`timestamp` tstamp
               FROM test_history h
-              INNER JOIN (SELECT CAST(username AS CHAR) sid_key, MAX(`timestamp`) last_time
-                          FROM test_history WHERE ($condR) OR ($condN) GROUP BY CAST(username AS CHAR)) t
-              ON CAST(h.username AS CHAR)=t.sid_key AND h.`timestamp`=t.last_time
-              WHERE ($condR) OR ($condN)";
+              WHERE ($condR) OR ($condN)
+              ORDER BY h.`timestamp` DESC";
+
         if($st=$conn->prepare($sql)){
-            $bindT=$tR.$tN.$tR.$tN; $bindV=array_merge($idsRaw,$idsNorm,$idsRaw,$idsNorm); if($bindT!=='') $st->bind_param($bindT,...$bindV);
-            $st->execute(); $rows=get_stmt_rows($st); $st->close();
-            $parse=function($val){ if($val===null) return []; $s=trim((string)$val); if($s==='') return [];
-                if($s[0]=='['||$s[0]=='{'){ $j=json_decode($s,true); if(is_array($j)){ $o=[]; foreach($j as $it){ if(is_string($it)) $o[]=trim($it); elseif(is_array($it)){ foreach(['name','title','subject','course_name'] as $k){ if(!empty($it[$k])){$o[]=trim((string)$it[$k]); break;} } } } return array_values(array_filter(array_unique($o))); } }
-                $parts=preg_split('/[,;\r\n]+/u',$s); $parts=array_map('trim',$parts); return array_values(array_filter(array_unique($parts))); };
-            foreach($rows as $r){ $studentOutcome[(string)$r['sid']] = ['group_name'=> (trim((string)$r['gname'])!=='')? trim((string)$r['gname']) : null, 'time'=>$r['tstamp'], 'courses'=>$parse($r['subjects'])]; }
-            $sourceNote .= ($sourceNote? ' | ' : '').'outcome=test_history';
+            $bindT=$tR.$tN; $bindV=array_merge($idsRaw,$idsNorm);
+            if($bindT!=='') $st->bind_param($bindT,...$bindV);
+            $st->execute(); 
+            $rows=get_stmt_rows($st); 
+            $st->close();
+
+            $parseSubjects=function($val){
+                if($val===null) return [];
+                $s=trim((string)$val);
+                if($s==='') return [];
+                if($s[0]=='['||$s[0]=='{'){
+                    $j=json_decode($s,true);
+                    if(is_array($j)){
+                        $o=[];
+                        foreach($j as $it){
+                            if(is_string($it)) $o[]=trim($it);
+                            elseif(is_array($it)){
+                                foreach(['name','title','subject','course_name'] as $k){
+                                    if(!empty($it[$k])){ $o[]=trim((string)$it[$k]); break; }
+                                }
+                            }
+                        }
+                        return array_values(array_filter(array_unique($o),fn($x)=>$x!==''));
+                    }
+                }
+                $parts=preg_split('/[,;\r\n]+/u',$s);
+                $parts=array_map('trim',$parts);
+                return array_values(array_filter(array_unique($parts),fn($x)=>$x!==''));
+            };
+
+            foreach($rows as $r){
+                $sidRaw  = (string)$r['sid'];
+                $sidNorm = norm_id($sidRaw);
+
+                $attempt = [
+                    'group_name' => (trim((string)$r['gname'])!=='')? trim((string)$r['gname']) : null,
+                    'time'       => $r['tstamp'],
+                    'courses'    => $parseSubjects($r['subjects']),
+                ];
+
+                if(!isset($studentAttempts[$sidRaw]))  $studentAttempts[$sidRaw]=[];
+                if(!isset($studentAttempts[$sidNorm])) $studentAttempts[$sidNorm]=[];
+
+                $studentAttempts[$sidRaw][]  = $attempt;
+                if($sidNorm !== $sidRaw) $studentAttempts[$sidNorm][] = $attempt;
+            }
+
+            $sourceNote .= ($sourceNote? ' | ' : '').'outcome=test_history(all)';
         }
     }
 }
@@ -440,12 +487,9 @@ tbody td { padding: 12px 16px; vertical-align: top; font-size: 14px; border-top:
                                     </tr>
                                 </thead>
                                 <tbody>
-                                <?php 
-                                    $outIdx = $studentOutcome ?? [];
-                                    foreach($students as $st):
+                                <?php foreach($students as $st):
                                         $sid=(string)$st['student_id'];
                                         $edu = $studentEdu[$sid] ?? null;
-                                        $oc = $outIdx[$sid] ?? $outIdx[norm_id($sid)] ?? null;
                                 ?>
                                     <tr class="master-row" data-sid="<?=h($sid)?>">
                                         <td><span class="code"><?=h($sid)?></span></td>
@@ -469,23 +513,42 @@ tbody td { padding: 12px 16px; vertical-align: top; font-size: 14px; border-top:
                                     <tr class="detail-row" style="display:none">
                                         <td colspan="4">
                                             <div class="detail-box">
-                                                <?php if($oc): ?>
-                                                    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
-                                                        <?php if(!empty($oc['group_name'])): ?>
-                                                            <span class="tag blue"><i class="fas fa-layer-group"></i> กลุ่มที่ได้: <?=h($oc['group_name'])?></span>
-                                                        <?php endif; ?>
-                                                        <?php if(!empty($oc['time'])): ?>
-                                                            <span class="small"><i class="fas fa-calendar-alt"></i> วันที่ทำแบบทดสอบ: <?=h($oc['time'])?></span>
-                                                        <?php endif; ?>
+                                                <?php
+                                                    // ประวัติการทำแบบทดสอบทั้งหมดของ นศ. คนนี้
+                                                    $attempts = $studentAttempts[$sid] ?? $studentAttempts[norm_id($sid)] ?? [];
+                                                ?>
+                                                <?php if(!empty($attempts)): ?>
+                                                    <div class="small" style="margin-bottom:8px">
+                                                        <i class="fas fa-history"></i> ประวัติการทำแบบทดสอบทั้งหมด: <b><?=count($attempts)?></b> ครั้ง
                                                     </div>
-                                                    <?php if(!empty($oc['courses'])): ?>
-                                                        <div class="small" style="margin-bottom:6px; font-weight:600"><i class="fas fa-book"></i> รายวิชาที่แนะนำ:</div>
-                                                        <ul class="clean">
-                                                            <?php foreach($oc['courses'] as $cn): ?><li><?=h($cn)?></li><?php endforeach; ?>
-                                                        </ul>
-                                                    <?php else: ?>
-                                                        <div class="small"><i class="fas fa-info-circle"></i> ไม่มีรายการวิชาที่แนะนำ</div>
-                                                    <?php endif; ?>
+
+                                                    <ul class="clean" style="margin-left:.25rem">
+                                                        <?php foreach($attempts as $idx => $att): ?>
+                                                            <li style="margin-bottom:10px">
+                                                                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                                                                    <?php if(!empty($att['group_name'])): ?>
+                                                                        <span class="tag blue"><i class="fas fa-layer-group"></i> กลุ่มที่ได้: <?=h($att['group_name'])?></span>
+                                                                    <?php else: ?>
+                                                                        <span class="tag"><i class="fas fa-layer-group"></i> กลุ่มที่ได้: -</span>
+                                                                    <?php endif; ?>
+                                                                    <?php if(!empty($att['time'])): ?>
+                                                                        <span class="small"><i class="fas fa-calendar-alt"></i> เวลา: <?=h($att['time'])?></span>
+                                                                    <?php endif; ?>
+                                                                    <span class="small" style="opacity:.8">#<?=($idx+1)?></span>
+                                                                </div>
+                                                                <?php if(!empty($att['courses'])): ?>
+                                                                    <div class="small" style="margin-bottom:4px; font-weight:600"><i class="fas fa-book"></i> รายวิชาที่แนะนำ:</div>
+                                                                    <ul class="clean" style="margin-left:1rem">
+                                                                        <?php foreach($att['courses'] as $cn): ?>
+                                                                            <li><?=h($cn)?></li>
+                                                                        <?php endforeach; ?>
+                                                                    </ul>
+                                                                <?php else: ?>
+                                                                    <div class="small"><i class="fas fa-info-circle"></i> ไม่มีรายการวิชาที่แนะนำ</div>
+                                                                <?php endif; ?>
+                                                            </li>
+                                                        <?php endforeach; ?>
+                                                    </ul>
                                                 <?php else: ?>
                                                     <div class="small"><i class="fas fa-minus-circle"></i> ยังไม่มีผลจากแบบทดสอบใน test_history</div>
                                                 <?php endif; ?>
@@ -564,7 +627,7 @@ document.addEventListener('DOMContentLoaded',function(){
     np.addEventListener('input',v); cp.addEventListener('input',v);
 });
 
-// Live search + counter
+// Live search + counter + accordion
 (function(){
     const q=document.getElementById('q');
     const tbody=document.querySelector('#list tbody');
@@ -589,7 +652,6 @@ document.addEventListener('DOMContentLoaded',function(){
     q.addEventListener('input',filter);
     updateCounter();
 
-    // Accordion open/close
     masters.forEach((m,i)=>{
         const a=m.querySelector('.row-link');
         const d=details[i];

@@ -1,306 +1,339 @@
 <?php
 session_start();
-include 'db_connect.php'; // เชื่อมต่อฐานข้อมูล (mysqli -> $conn)
+include 'db_connect.php';
 
-if (!isset($_SESSION['student_id'])) {
-    header("Location: login.php");
-    exit();
-}
+// ตรวจสอบการเข้าสู่ระบบ
+if (!isset($_SESSION['student_id'])) { header("Location: login.php"); exit(); }
 
 $student_id = $_SESSION['student_id'];
 $full_name = 'ไม่พบชื่อ';
 $profile_picture_src = '';
 $gender = '';
 
-/* ----------------- helper: safe html ----------------- */
+// escape
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
-/* ----------------- โหลดชื่อ/รูป/เพศ ----------------- */
+// โหลดข้อมูลนักศึกษา
 $sql_student_info = "SELECT p.full_name, p.profile_picture, p.gender
                      FROM personal_info p
                      INNER JOIN education_info e ON p.id = e.personal_id
                      WHERE e.student_id = ?";
-if ($stmt_student_info = $conn->prepare($sql_student_info)) {
-    $stmt_student_info->bind_param("s", $student_id);
-    $stmt_student_info->execute();
-    $res = $stmt_student_info->get_result();
+if ($stmt = $conn->prepare($sql_student_info)) {
+    $stmt->bind_param("s", $student_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
     if ($res && $res->num_rows === 1) {
         $row = $res->fetch_assoc();
         $full_name = h($row['full_name'] ?? 'ไม่ระบุชื่อ');
         $genderRaw = $row['gender'] ?? '';
         $gender = mb_strtolower($genderRaw, 'UTF-8');
-
-        if (!empty($row['profile_picture']) && file_exists('uploads/profile_images/' . $row['profile_picture'])) {
-            $profile_picture_src = 'uploads/profile_images/' . h($row['profile_picture']);
+        if (!empty($row['profile_picture']) && file_exists('uploads/profile_images/'.$row['profile_picture'])) {
+            $profile_picture_src = 'uploads/profile_images/'.h($row['profile_picture']);
         } else {
-            $avatar_bg =
-                ($gender === 'ชาย' || $gender === 'male') ? '3498db' :
-                (($gender === 'หญิง' || $gender === 'female') ? 'e91e63' : '9b59b6');
-            $profile_picture_src = 'https://ui-avatars.com/api/?name=' . urlencode($full_name ?: 'Student')
-                . '&background=' . $avatar_bg . '&color=ffffff&size=150&font-size=0.6&rounded=true';
+            $bg = ($gender==='ชาย'||$gender==='male')?'3498db':(($gender==='หญิง'||$gender==='female')?'e91e63':'9b59b6');
+            $profile_picture_src = 'https://ui-avatars.com/api/?name='.urlencode($full_name?:'Student')
+                                 .'&background='.$bg.'&color=ffffff&size=150&font-size=0.6&rounded=true';
         }
     }
-    $stmt_student_info->close();
+    $stmt->close();
 }
 
-/* ----------------- DB helpers ----------------- */
+// ===== DB helpers =====
 function db_name(mysqli $conn): string {
-    $db = 'studentregistration';
-    if ($r = $conn->query("SELECT DATABASE() AS dbname")) {
-        if ($rw = $r->fetch_assoc()) { $db = $rw['dbname'] ?: $db; }
-    }
+    $db='studentregistration';
+    if ($r=$conn->query("SELECT DATABASE() AS dbname")) { $rw=$r->fetch_assoc(); $db=$rw['dbname']?:$db; }
     return $db;
 }
-function has_table(mysqli $conn, string $db, string $table): bool {
-    $sql = "SELECT COUNT(*) AS c FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?";
-    $st = $conn->prepare($sql);
-    $st->bind_param('ss', $db, $table);
-    $st->execute();
-    $g = $st->get_result(); $st->close();
-    return $g && ((int)$g->fetch_assoc()['c'] > 0);
+function has_table(mysqli $conn,string $db,string $t):bool{
+    $st=$conn->prepare("SELECT COUNT(*) c FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?");
+    $st->bind_param('ss',$db,$t); $st->execute(); $g=$st->get_result(); $st->close();
+    return $g && (int)$g->fetch_assoc()['c']>0;
 }
-function has_col(mysqli $conn, string $db, string $table, string $col): bool {
-    $sql = "SELECT COUNT(*) AS c FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?";
-    $st = $conn->prepare($sql);
-    $st->bind_param('sss', $db, $table, $col);
-    $st->execute();
-    $g = $st->get_result(); $st->close();
-    return $g && ((int)$g->fetch_assoc()['c'] > 0);
+function has_col(mysqli $conn,string $db,string $t,string $c):bool{
+    $st=$conn->prepare("SELECT COUNT(*) c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND COLUMN_NAME=?");
+    $st->bind_param('sss',$db,$t,$c); $st->execute(); $g=$st->get_result(); $st->close();
+    return $g && (int)$g->fetch_assoc()['c']>0;
 }
 
-/* ----------------- ทำให้ตาราง test_history ใช้งานได้แน่นอน ----------------- */
-$db = db_name($conn);
-
-/** สร้างตารางถ้ายังไม่มี (สคีมาตามที่ quiz.php ใช้บันทึก) */
-if (!$conn->query("
-    CREATE TABLE IF NOT EXISTS test_history (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(255) NOT NULL,
-        recommended_group VARCHAR(255) DEFAULT NULL,
-        recommended_subjects TEXT DEFAULT NULL,
-        no_count INT DEFAULT 0,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        KEY idx_user_time (username, timestamp)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-")) {
-    // ถ้าสร้างไม่ได้ ให้โชว์ข้อความเตือน แต่อย่าให้หน้าเด้ง
-    $create_error = "สร้างตาราง test_history ไม่สำเร็จ: ".h($conn->error);
-} else {
-    $create_error = '';
+// ===== parse subjects =====
+function parse_subjects(?string $text): array{
+    if (!$text) return [];
+    $norm = preg_replace('/[;\|\t\r\n]+/u', ',', $text);
+    $parts = array_filter(array_map('trim', explode(',', $norm)), fn($x)=>$x!=='');
+    $seen=[]; $out=[];
+    foreach ($parts as $p){ $k=mb_strtolower($p,'UTF-8'); if(!isset($seen[$k])){$seen[$k]=1;$out[]=$p;} }
+    return $out;
 }
 
-/** เติมคอลัมน์ที่ขาด (รองรับ MySQL 8+: ADD COLUMN IF NOT EXISTS; ถ้าเวอร์ชันต่ำกว่า ให้ข้ามเงียบ ๆ) */
-@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS username VARCHAR(255) NOT NULL");
-@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS recommended_group VARCHAR(255) NULL");
-@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS recommended_subjects TEXT NULL");
-@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS no_count INT DEFAULT 0");
-@$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
-@$conn->query("ALTER TABLE test_history ADD INDEX IF NOT EXISTS idx_user_time (username, timestamp)");
-
-/* ถ้าเวอร์ชัน MySQL ไม่รองรับ IF NOT EXISTS ให้เช็คซ้ำแบบละเอียด แล้วเติมแบบมีเงื่อนไข */
-$needFix = [];
-foreach (['username','recommended_group','recommended_subjects','no_count','timestamp'] as $col) {
-    if (!has_col($conn, $db, 'test_history', $col)) $needFix[] = $col;
-}
-if (!empty($needFix)) {
-    // เติมทีละคอลัมน์ด้วย ALTER (สำหรับ MySQL 5.7)
-    foreach ($needFix as $col) {
-        if ($col === 'username') {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN username VARCHAR(255) NOT NULL");
-        } elseif ($col === 'recommended_group') {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN recommended_group VARCHAR(255) NULL");
-        } elseif ($col === 'recommended_subjects') {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN recommended_subjects TEXT NULL");
-        } elseif ($col === 'no_count') {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN no_count INT DEFAULT 0");
-        } elseif ($col === 'timestamp') {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
-        }
+// ===== find course =====
+function find_course_by_token(mysqli $conn,string $token):?array{
+    if ($st=$conn->prepare("SELECT * FROM courses WHERE LOWER(course_code)=LOWER(?) LIMIT 1")){
+        $st->bind_param('s',$token); $st->execute(); $rs=$st->get_result();
+        if($rs && $rs->num_rows>0){ $row=$rs->fetch_assoc(); $st->close(); return $row; } $st->close();
     }
-    // ดัชนี
-    if ($conn->query("SHOW INDEX FROM test_history WHERE Key_name='idx_user_time'")->num_rows === 0) {
+    if ($st=$conn->prepare("SELECT * FROM courses WHERE course_name=? LIMIT 1")){
+        $st->bind_param('s',$token); $st->execute(); $rs=$st->get_result();
+        if($rs && $rs->num_rows>0){ $row=$rs->fetch_assoc(); $st->close(); return $row; } $st->close();
+    }
+    $like='%'.$token.'%';
+    if ($st=$conn->prepare("SELECT * FROM courses WHERE course_name LIKE ? ORDER BY course_code LIMIT 1")){
+        $st->bind_param('s',$like); $st->execute(); $rs=$st->get_result();
+        if($rs && $rs->num_rows>0){ $row=$rs->fetch_assoc(); $st->close(); return $row; } $st->close();
+    }
+    return null;
+}
+
+// ===== ensure test_history =====
+$db = db_name($conn);
+$create_error = '';
+$conn->query("CREATE TABLE IF NOT EXISTS test_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(255) NOT NULL,
+    recommended_group VARCHAR(255) DEFAULT NULL,
+    recommended_subjects TEXT DEFAULT NULL,
+    no_count INT DEFAULT 0,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_user_time (username, timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;") or $create_error = "สร้างตาราง test_history ไม่สำเร็จ: ".h($conn->error);
+
+// columns (เผื่อเวอร์ชันที่ไม่มี IF NOT EXISTS)
+$cols = ['username'=>'VARCHAR(255) NOT NULL','recommended_group'=>'VARCHAR(255) NULL','recommended_subjects'=>'TEXT NULL','no_count'=>'INT DEFAULT 0','timestamp'=>'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'];
+foreach($cols as $c=>$def){ @$conn->query("ALTER TABLE test_history ADD COLUMN IF NOT EXISTS $c $def"); }
+@$conn->query("ALTER TABLE test_history ADD INDEX IF NOT EXISTS idx_user_time (username, timestamp)");
+$needFix=[];
+foreach(array_keys($cols) as $c){ if(!has_col($conn,$db,'test_history',$c)) $needFix[]=$c; }
+if($needFix){
+    foreach($needFix as $c){ @$conn->query("ALTER TABLE test_history ADD COLUMN $c ".$cols[$c]); }
+    if($conn->query("SHOW INDEX FROM test_history WHERE Key_name='idx_user_time'")->num_rows===0){
         @$conn->query("ALTER TABLE test_history ADD INDEX idx_user_time (username, `timestamp`)");
     }
 }
 
-/* ----------------- คิวรีประวัติแบบแข็งแรง ----------------- */
-/** โค้ด quiz.php ใช้คอลัมน์ username ตอนบันทึก ดังนั้นเราจะอ่านจากคอลัมน์นี้ก่อน
- *  ถ้าไม่มีจริง ๆ (ระบบเก่าบันทึกเป็น student_id) จะ fallback ไป student_id
- */
-$history_result = null;
-$history_error = '';
-
-if (has_table($conn, $db, 'test_history')) {
-    // หา id column ที่ใช้งานได้จริง ๆ
-    $idCol = null;
-    if (has_col($conn, $db, 'test_history', 'username')) $idCol = 'username';
-    elseif (has_col($conn, $db, 'test_history', 'student_id')) $idCol = 'student_id';
-    else {
-        // ถ้าไม่มีสักอัน ให้สร้าง username แล้วคัดลอกจาก student_id ถ้ามี (ทำครั้งเดียว)
-        if (!has_col($conn, $db, 'test_history', 'username')) {
-            @$conn->query("ALTER TABLE test_history ADD COLUMN username VARCHAR(255) NULL");
-        }
-        if (has_col($conn, $db, 'test_history', 'student_id')) {
-            @$conn->query("UPDATE test_history SET username = COALESCE(username, student_id)");
-        }
+// ===== read history =====
+$history_result=null; $history_error='';
+if (has_table($conn,$db,'test_history')){
+    $idCol = has_col($conn,$db,'test_history','username') ? 'username'
+           : (has_col($conn,$db,'test_history','student_id') ? 'student_id' : null);
+    if(!$idCol){
+        @$conn->query("ALTER TABLE test_history ADD COLUMN username VARCHAR(255) NULL");
+        if (has_col($conn,$db,'test_history','student_id')) { @$conn->query("UPDATE test_history SET username = COALESCE(username, student_id)"); }
         @$conn->query("ALTER TABLE test_history MODIFY COLUMN username VARCHAR(255) NOT NULL");
-        $idCol = 'username';
+        $idCol='username';
     }
+    $timeCol=null; foreach(['timestamp','created_at','taken_at','updated_at','createdAt'] as $c){ if(has_col($conn,$db,'test_history',$c)){$timeCol=$c;break;} }
+    if(!$timeCol){ @$conn->query("ALTER TABLE test_history ADD COLUMN `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"); $timeCol='timestamp'; }
 
-    // หา time column
-    $timeCandidates = ['timestamp', 'created_at', 'taken_at', 'updated_at', 'createdAt'];
-    $timeCol = null;
-    foreach ($timeCandidates as $c) {
-        if (has_col($conn, $db, 'test_history', $c)) { $timeCol = $c; break; }
-    }
-    // ถ้าไม่มีจริง ๆ ให้สร้าง timestamp
-    if (!$timeCol) {
-        @$conn->query("ALTER TABLE test_history ADD COLUMN `timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
-        $timeCol = 'timestamp';
-    }
-
-    // columns to select
-    $cols = [];
-    $cols[] = "`$timeCol` AS dt";
-    if (has_col($conn, $db, 'test_history', 'recommended_group')) $cols[] = "recommended_group";
-    if (has_col($conn, $db, 'test_history', 'recommended_subjects')) $cols[] = "recommended_subjects";
-
-    $sel = implode(', ', $cols);
-    $history_sql = "SELECT $sel FROM test_history WHERE `$idCol` = ? ORDER BY `$timeCol` DESC";
-
-    if ($stmt_history = $conn->prepare($history_sql)) {
-        $stmt_history->bind_param("s", $student_id);
-        $stmt_history->execute();
-        $history_result = $stmt_history->get_result();
-        $stmt_history->close();
-    } else {
-        $history_error = "ไม่สามารถเตรียมคำสั่งอ่านประวัติได้: " . h($conn->error);
-    }
+    $sel = "`$timeCol` AS dt";
+    if (has_col($conn,$db,'test_history','recommended_group'))    $sel .= ", recommended_group";
+    if (has_col($conn,$db,'test_history','recommended_subjects')) $sel .= ", recommended_subjects";
+    $sql = "SELECT $sel FROM test_history WHERE `$idCol`=? ORDER BY `$timeCol` DESC";
+    if ($st=$conn->prepare($sql)){ $st->bind_param("s",$student_id); $st->execute(); $history_result=$st->get_result(); $st->close(); }
+    else { $history_error = "ไม่สามารถเตรียมคำสั่งอ่านประวัติได้: ".h($conn->error); }
 } else {
     $history_error = "ไม่พบตาราง test_history — หน้านี้จึงยังแสดงประวัติไม่ได้";
 }
 ?>
-<!DOCTYPE html>
+<!doctype html>
 <html lang="th">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ประวัติการใช้งาน</title>
-  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root{--primary:#3498db;--secondary:#2980b9;--text:#333;--shadow:0 4px 6px rgba(0,0,0,.1);--radius:8px;}
-    *{margin:0;padding:0;box-sizing:border-box;font-family:'Prompt',sans-serif}
-    body{background:#f5f7fa;color:var(--text);line-height:1.6}
-    .navbar{background:var(--primary);padding:15px 30px;color:#fff;display:flex;justify-content:space-between;align-items:center;box-shadow:var(--shadow)}
-    .navbar-brand{font-size:20px;font-weight:bold}
-    .navbar-user{display:flex;align-items:center}
-    .user-info{margin-right:20px;text-align:right}
-    .user-name{font-weight:bold;font-size:14px}
-    .user-id{font-size:12px;opacity:.9}
-    .logout-btn{background:rgba(255,255,255,.2);color:#fff;border:none;padding:8px 15px;border-radius:8px;cursor:pointer;font-size:14px;text-decoration:none}
-    .logout-btn:hover{background:rgba(255,255,255,.3)}
-    .container{max-width:1200px;margin:30px auto;padding:0 20px}
-    .dashboard-header{margin-bottom:30px}
-    .dashboard-header h1{font-size:28px;color:var(--secondary);margin-bottom:10px}
-    .card{background:#fff;border-radius:8px;box-shadow:var(--shadow);padding:20px}
-    .card-header{border-bottom:1px solid #eee;padding-bottom:12px;margin-bottom:12px}
-    .card-title{font-size:18px;color:var(--secondary)}
-    .action-buttons{display:flex;gap:15px;margin:20px 0 30px;flex-wrap:wrap}
-    .btn{padding:12px 20px;text-decoration:none;font-size:14px;font-weight:500;border:1px solid #e5e7eb;border-radius:8px;transition:.2s;display:inline-flex;align-items:center;gap:8px;color:#374151;background:#fff}
-    .btn:hover{background:#f8fafc}
-    .btn-primary{border-left:3px solid #3b82f6}
-    .btn-success{border-left:3px solid #10b981}
-    .btn-warning{border-left:3px solid #f59e0b}
-    .btn-info{border-left:3px solid #8b5cf6}
-    .table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
-    .table th,.table td{border:1px solid #e5e7eb;padding:12px;text-align:left;vertical-align:top}
-    .table th{background:#f2f2f2;font-weight:600;color:#555}
-    .table tbody tr:nth-child(even){background:#f9f9f9}
-    .table tbody tr:hover{background:#eaf6ff}
-    .alert{padding:12px 14px;border-left:4px solid #f59e0b;background:#fff7ed;color:#92400e;border-radius:8px;margin-bottom:12px}
-    @media (max-width:768px){
-      .navbar{flex-direction:column;text-align:center}
-      .navbar-user{margin-top:10px;flex-direction:column}
-      .user-info{margin:0 0 10px 0;text-align:center}
-      .table,.table thead,.table tbody,.table th,.table td,.table tr{display:block}
-      .table thead tr{position:absolute;top:-9999px;left:-9999px}
-      .table tr{border:1px solid #e0e0e0;margin-bottom:10px}
-      .table td{border:none;border-bottom:1px solid #eee;position:relative;padding-left:50%;text-align:right}
-      .table td:before{position:absolute;top:0;left:6px;width:45%;padding-right:10px;white-space:nowrap;text-align:left;font-weight:700;color:#555}
-      .table td:nth-of-type(1):before{content:"วันที่";}
-      .table td:nth-of-type(2):before{content:"กลุ่มที่แนะนำ";}
-      .table td:nth-of-type(3):before{content:"รายวิชาที่แนะนำ";}
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ประวัติการใช้งาน</title>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#111827; --sub:#6b7280; --bg:#f8fafc; --card:#ffffff; --border:#e5e7eb;
+  --primary:#1f6feb; --muted:#94a3b8; --radius:12px;
+}
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink); font-family:'Prompt',system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+a{color:inherit; text-decoration:none}
+
+/* navbar */
+.navbar{background:var(--primary); color:#fff; padding:14px 18px; display:flex; justify-content:space-between; align-items:center}
+.brand{font-weight:700}
+.user{display:flex; align-items:center; gap:12px}
+.user small{opacity:.9}
+.btn-link{background:rgba(255,255,255,.16); color:#fff; padding:6px 10px; border-radius:8px}
+.btn-link:hover{background:rgba(255,255,255,.25)}
+
+/* container */
+.container{max-width:1100px; margin:22px auto; padding:0 16px}
+h1{margin:0 0 4px; font-size:22px}
+.sub{color:var(--sub); margin:0 0 16px}
+
+/* actions */
+.actions{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px}
+.btn{background:#fff; border:1px solid var(--border); padding:8px 12px; border-radius:9px; font-weight:500}
+.btn:hover{background:#f3f4f6}
+
+/* card */
+.card{background:var(--card); border:1px solid var(--border); border-radius:var(--radius)}
+.card-h{padding:12px 14px; border-bottom:1px solid var(--border); font-weight:700}
+.card-b{padding:10px 14px}
+
+/* alert */
+.alert{padding:10px 12px; border:1px solid #fde68a; background:#fef9c3; border-radius:8px; color:#92400e; margin-bottom:10px}
+
+/* table */
+.table{width:100%; border-collapse:collapse; font-size:14px}
+.table th,.table td{border:1px solid var(--border); padding:10px; vertical-align:top; text-align:left}
+.table th{background:#f3f4f6; font-weight:600}
+.table tbody tr:nth-child(even){background:#fafafa}
+
+/* badge */
+.badge{display:inline-block; padding:2px 8px; font-size:12px; border-radius:999px; background:#e0f2fe; color:#075985; border:1px solid #bae6fd}
+
+/* subject list */
+.sublist{margin:6px 0 0 16px; padding-left:0}
+.sublist li{margin:2px 0; color:#111827}
+
+/* detail table (compact) */
+.subtable{width:100%; border-collapse:collapse; margin-top:8px; font-size:13px}
+.subtable th,.subtable td{border:1px solid var(--border); padding:8px}
+.subtable th{background:#f9fafb}
+.muted{color:var(--muted); font-size:13px}
+
+/* empty */
+.empty{padding:28px 6px; text-align:center; color:var(--sub); font-style:italic}
+
+/* responsive */
+@media (max-width:768px){
+  .table, .table thead, .table tbody, .table th, .table td, .table tr{display:block}
+  .table thead{display:none}
+  .table tr{border:1px solid var(--border); margin-bottom:10px}
+  .table td{border:none; border-bottom:1px solid var(--border); position:relative; padding-left:44%}
+  .table td:before{position:absolute; left:8px; top:8px; width:36%; font-weight:600; color:#374151}
+  .td-dt:before{content:"วันที่/เวลา";}
+  .td-grp:before{content:"กลุ่มที่แนะนำ";}
+  .td-sub:before{content:"รายวิชาที่แนะนำ";}
+}
+</style>
 </head>
 <body>
-<div class="navbar">
-  <div class="navbar-brand">ระบบทะเบียนนักศึกษา</div>
-  <div class="navbar-user">
-    <div class="user-info">
-      <div class="user-name"><?php echo $full_name; ?></div>
-      <div class="user-id">รหัสนักศึกษา: <?php echo h($student_id); ?></div>
+  <div class="navbar">
+    <div class="brand">ระบบทะเบียนนักศึกษา</div>
+    <div class="user">
+      <div>
+        <div style="font-weight:600"><?php echo $full_name; ?></div>
+        <small>รหัสนักศึกษา: <?php echo h($student_id); ?></small>
+      </div>
+      <a class="btn-link" href="index.php">ออกจากระบบ</a>
     </div>
-    <a href="index.php" class="logout-btn">ออกจากระบบ</a>
   </div>
-</div>
 
-<div class="container">
-  <div class="dashboard-header">
+  <div class="container">
     <h1>ประวัติการใช้งาน</h1>
-    <p>หน้าสำหรับแสดงประวัติการทำแบบทดสอบและกิจกรรมอื่นๆ</p>
-  </div>
+    <p class="sub">ผลแบบทดสอบและรายวิชาที่แนะนำ (รูปแบบอ่านง่าย)</p>
 
-  <div class="action-buttons">
-    <a href="student_dashboard.php" class="btn btn-primary">🏠 กลับหน้าหลัก</a>
-    <a href="edit_profile.php" class="btn btn-success">✏️ แก้ไขข้อมูลส่วนตัว</a>
-    <a href="history.php" class="btn btn-warning">📋 ประวัติการใช้งาน</a>
-    <a href="quiz.php" class="btn btn-info">📝 ทำแบบทดสอบ</a>
-  </div>
-
-  <div class="card">
-    <div class="card-header">
-      <h2 class="card-title">ประวัติการทำแบบทดสอบ</h2>
+    <div class="actions">
+      <a class="btn" href="student_dashboard.php">🏠 กลับหน้าหลัก</a>
+      <a class="btn" href="edit_profile.php">✏️ แก้ไขข้อมูลส่วนตัว</a>
+      <a class="btn" href="history.php">📋 ประวัติการใช้งาน</a>
+      <a class="btn" href="quiz.php">📝 ทำแบบทดสอบ</a>
     </div>
-    <div class="card-body">
-      <?php if (!empty($create_error)): ?>
-        <div class="alert">⚠️ <?php echo $create_error; ?></div>
-      <?php endif; ?>
 
-      <?php
-      // ข้อความ error จากขั้นอ่านข้อมูล
-      if (!empty($history_error)) {
-          echo '<div class="alert">ℹ️ '. $history_error .'</div>';
-      }
-      ?>
+    <div class="card">
+      <div class="card-h">ผลแบบทดสอบของคุณ</div>
+      <div class="card-b">
 
-      <?php if ($history_result && $history_result->num_rows > 0): ?>
-        <table class="table">
-          <thead>
-            <tr>
-              <th>วันที่/เวลา</th>
-              <th>กลุ่มที่แนะนำ</th>
-              <th>รายวิชาที่แนะนำ</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php while($r = $history_result->fetch_assoc()): ?>
+        <?php if (!empty($create_error)): ?>
+          <div class="alert">⚠️ <?php echo $create_error; ?></div>
+        <?php endif; ?>
+        <?php if (!empty($history_error)): ?>
+          <div class="alert">ℹ️ <?php echo $history_error; ?></div>
+        <?php endif; ?>
+
+        <?php if ($history_result && $history_result->num_rows > 0): ?>
+          <table class="table">
+            <thead>
               <tr>
-                <td><?php echo h($r['dt'] ?? ($r['timestamp'] ?? '')); ?></td>
-                <td><?php echo h($r['recommended_group'] ?? ''); ?></td>
-                <td><?php echo nl2br(h($r['recommended_subjects'] ?? '')); ?></td>
+                <th style="width:170px">วันที่/เวลา</th>
+                <th style="width:220px">กลุ่มที่แนะนำ</th>
+                <th>รายวิชาที่แนะนำ</th>
+              </tr>
+            </thead>
+            <tbody>
+            <?php while($r=$history_result->fetch_assoc()): ?>
+              <?php
+                $dt = h($r['dt'] ?? ($r['timestamp'] ?? ''));
+                $grp = trim((string)($r['recommended_group'] ?? ''));
+                $subText = (string)($r['recommended_subjects'] ?? '');
+                $tokens = parse_subjects($subText);
+
+                // ดึงรายละเอียดวิชาแบบเรียบง่าย (ไม่มีปุ่ม/ลูกเล่น)
+                $details=[];
+                foreach($tokens as $tok){
+                  $course = find_course_by_token($conn, $tok);
+                  if($course){ $details[]=$course; }
+                  else{
+                    $details[]=['course_code'=>$tok,'course_name'=>'(ไม่พบในฐานข้อมูล)','credits'=>null,'recommended_year'=>null,'prereq_text'=>null,'is_compulsory'=>0];
+                  }
+                }
+              ?>
+              <tr>
+                <td class="td-dt"><?php echo $dt ?: '—'; ?></td>
+                <td class="td-grp">
+                  <?php if($grp!==''): ?>
+                    <span class="badge"><?php echo h($grp); ?></span>
+                  <?php else: ?>
+                    <span class="muted">ไม่ระบุ</span>
+                  <?php endif; ?>
+                </td>
+                <td class="td-sub">
+                  <?php if (!empty($tokens)): ?>
+                    <ul class="sublist">
+                      <?php
+                        $maxList = 8; // โชว์ชื่อวิชาสั้นๆ ไม่เกิน 8 บรรทัด
+                        foreach ($tokens as $i=>$t):
+                          if ($i >= $maxList) break;
+                      ?>
+                        <li><?php echo h($t); ?></li>
+                      <?php endforeach; ?>
+                      <?php if (count($tokens) > $maxList): ?>
+                        <li class="muted">…และอีก <?php echo count($tokens)-$maxList; ?> วิชา</li>
+                      <?php endif; ?>
+                    </ul>
+
+                    <!-- ตารางรายละเอียดแบบเรียบ -->
+                    <table class="subtable">
+                      <thead>
+                        <tr>
+                          <th style="width:120px">รหัสวิชา</th>
+                          <th>ชื่อวิชา</th>
+                          <th style="width:84px">หน่วยกิต</th>
+                          <th style="width:120px">ปีที่แนะนำ</th>
+                          <th>วิชาบังคับก่อน</th>
+                          <th style="width:90px">สถานะ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <?php foreach($details as $c): ?>
+                          <tr>
+                            <td><?php echo h($c['course_code'] ?? '—'); ?></td>
+                            <td><?php echo h($c['course_name'] ?? '—'); ?></td>
+                            <td><?php echo isset($c['credits']) ? h((string)(float)$c['credits']) : '—'; ?></td>
+                            <td><?php echo !empty($c['recommended_year']) ? h($c['recommended_year']) : '—'; ?></td>
+                            <td><?php echo !empty($c['prereq_text']) ? nl2br(h($c['prereq_text'])) : '—'; ?></td>
+                            <td><?php echo !empty($c['is_compulsory']) ? 'บังคับ' : 'เลือกได้'; ?></td>
+                          </tr>
+                        <?php endforeach; ?>
+                      </tbody>
+                    </table>
+                  <?php else: ?>
+                    <span class="muted">—</span>
+                  <?php endif; ?>
+                </td>
               </tr>
             <?php endwhile; ?>
-          </tbody>
-        </table>
-      <?php elseif (empty($history_error)): ?>
-        <p style="text-align:center;color:#7f8c8d;font-style:italic;padding:18px">
-          ยังไม่มีประวัติการทำแบบทดสอบในขณะนี้ ข้อมูลจะปรากฏขึ้นเมื่อคุณทำแบบทดสอบเสร็จสิ้น
-        </p>
-      <?php endif; ?>
+            </tbody>
+          </table>
+        <?php elseif (empty($history_error)): ?>
+          <div class="empty">ยังไม่มีประวัติการทำแบบทดสอบ</div>
+        <?php endif; ?>
+
+      </div>
     </div>
   </div>
-</div>
 </body>
 </html>

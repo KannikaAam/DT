@@ -181,7 +181,6 @@ function get_table_columns(PDO $pdo, string $name): array {
 }
 // --- schema repair for questions.group_id to allow NULL + FK SET NULL ---
 try {
-    // มีคอลัมน์ group_id ไหม
     $cols = $pdo->query("SHOW COLUMNS FROM `questions`")->fetchAll(PDO::FETCH_ASSOC);
     $hasGroup = false;
     foreach ($cols as $c) {

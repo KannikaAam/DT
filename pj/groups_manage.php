@@ -1,5 +1,5 @@
 <?php 
-// groups_manage.php — จัดการกลุ่มเรียน (เชื่อม education_info.student_group & curriculum_name)
+// groups_manage.php — จัดการกลุ่มเรียน (เชื่อม education_info.student_group & curriculum_name เป็น 'ตัวหนังสือ')
 // Theme: Dark/Glass ให้เหมือนหน้า admin_dashboard.php
 session_start();
 if (empty($_SESSION['loggedin'])) { header('Location: login.php?error=unauthorized'); exit; }
@@ -24,7 +24,7 @@ try{
   $q=$pdo->prepare("SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='course_groups' AND COLUMN_NAME='curriculum_value' LIMIT 1");
   $q->execute(); if(!$q->fetchColumn()){
-    $pdo->exec("ALTER TABLE course_groups ADD COLUMN curriculum_value VARCHAR(100) NULL AFTER course_id");
+    $pdo->exec("ALTER TABLE course_groups ADD COLUMN curriculum_value VARCHAR(255) NULL AFTER course_id");
   }
   $q=$pdo->prepare("SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
                     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='course_groups' AND INDEX_NAME='idx_cg_cur_group'");
@@ -113,52 +113,101 @@ function fo_fetch_by_type(PDO $pdo, string $type){
   $st->execute($params);
   return $st->fetchAll(PDO::FETCH_ASSOC);
 }
-function curriculumOptions(PDO $pdo){ return fo_fetch_by_type($pdo, 'curriculum_name'); }
+
+/* === ใช้ label เป็น value เสมอ เพื่อไม่ให้ส่งเลขกลับ DB === */
+function curriculumOptions(PDO $pdo){
+  $rows = fo_fetch_by_type($pdo, 'curriculum_name');
+  return array_map(function($r){
+    $label = isset($r['label']) ? (string)$r['label'] : (isset($r['value']) ? (string)$r['value'] : '');
+    return ['value' => $label, 'label' => $label];
+  }, $rows);
+}
 function groupNameOptions(PDO $pdo){ return fo_fetch_by_type($pdo, 'student_group'); }
 
 /* ===== Data helpers ===== */
 function teachersList(PDO $pdo){
-  // รองรับอย่างน้อยคอลัมน์ name; ถ้ามี display_name ใช้ name แทน
   $nameCol = colExists($pdo,'teacher','name') ? 'name' : (colExists($pdo,'teacher','display_name') ? 'display_name' : 'name');
   $idCol   = colExists($pdo,'teacher','teacher_id') ? 'teacher_id' : 'id';
   $stmt = $pdo->query("SELECT {$idCol} AS teacher_id, {$nameCol} AS teacher_name FROM teacher ORDER BY {$nameCol}");
   return $stmt->fetchAll(PDO::FETCH_ASSOC);
 }
+
+/* === groupsByCurriculum: กันเคสเก่าที่ curriculum_name ใน education_info ยังเป็นตัวเลข === */
 function groupsByCurriculum(PDO $pdo, $cur, $is_admin, $is_teacher, $uid){
-  $base="SELECT cg.*,
-               t.name AS teacher_name,
-               (SELECT COUNT(*) FROM education_info ei
-                 WHERE ei.curriculum_name=cg.curriculum_value
-                   AND ei.student_group=cg.group_name) AS student_count
-        FROM course_groups cg
-        LEFT JOIN teacher t ON cg.teacher_id=t.teacher_id
-        WHERE cg.curriculum_value=?";
+  $base = "
+    SELECT cg.*,
+           t.name AS teacher_name,
+           (
+             SELECT COUNT(*)
+             FROM education_info ei
+             WHERE (
+               ei.curriculum_name = cg.curriculum_value
+               OR (
+                 ei.curriculum_name REGEXP '^[0-9]+$'
+                 AND EXISTS (
+                   SELECT 1 FROM form_options f
+                   WHERE f.type='curriculum_name'
+                     AND f.id = CAST(ei.curriculum_name AS UNSIGNED)
+                     AND f.label = cg.curriculum_value
+                 )
+               )
+             )
+             AND ei.student_group = cg.group_name
+           ) AS student_count
+    FROM course_groups cg
+    LEFT JOIN teacher t ON cg.teacher_id=t.teacher_id
+    WHERE cg.curriculum_value=?
+  ";
   if ($is_admin){ $sql="$base ORDER BY cg.group_name"; $st=$pdo->prepare($sql); $st->execute([$cur]); }
   else { $sql="$base AND cg.teacher_id=? ORDER BY cg.group_name"; $st=$pdo->prepare($sql); $st->execute([$cur,$uid]); }
   return $st->fetchAll(PDO::FETCH_ASSOC);
 }
+
 function groupSignature(PDO $pdo, $group_id){
   $st=$pdo->prepare("SELECT group_id, curriculum_value, group_name, teacher_id, max_students FROM course_groups WHERE group_id=?");
   $st->execute([$group_id]); return $st->fetch(PDO::FETCH_ASSOC) ?: null;
 }
+
+/* === roster: ดึงชื่อจาก personal_info (ไม่พึ่ง students) และกันเคสเก่า === */
 function roster(PDO $pdo, $group_id, $is_admin, $is_teacher, $uid){
   if ($is_teacher){
     $chk=$pdo->prepare("SELECT 1 FROM course_groups WHERE group_id=? AND teacher_id=?");
     $chk->execute([$group_id,$uid]); if(!$chk->fetchColumn()) return [];
   }
   $sig = groupSignature($pdo,$group_id); if(!$sig) return [];
-  $nameExpr=studentNameExpr($pdo); $codeExpr=studentCodeExpr($pdo);
-  $statusExpr = eiStatusExpr($pdo); $dateExpr = eiEnrollDateExpr($pdo);
 
-  $sql="SELECT s.student_id, {$codeExpr} AS student_code, {$nameExpr} AS student_name,
-               {$statusExpr} AS status, {$dateExpr} AS enrollment_date
-        FROM education_info ei
-        INNER JOIN students s ON s.student_id=ei.student_id
-        WHERE ei.curriculum_name=? AND ei.student_group=?
-        ORDER BY student_name";
-  $st=$pdo->prepare($sql); $st->execute([$sig['curriculum_value'],$sig['group_name']]);
+  $statusExpr = eiStatusExpr($pdo);
+  $dateExpr   = eiEnrollDateExpr($pdo);
+
+  $sql = "
+    SELECT 
+      ei.student_id,
+      CAST(ei.student_id AS CHAR) AS student_code,
+      COALESCE(NULLIF(TRIM(p.full_name),''), CAST(ei.student_id AS CHAR)) AS student_name,
+      {$statusExpr} AS status,
+      {$dateExpr}   AS enrollment_date
+    FROM education_info ei
+    INNER JOIN personal_info p ON p.id = ei.personal_id
+    WHERE (
+            ei.curriculum_name = :cur
+            OR (
+              ei.curriculum_name REGEXP '^[0-9]+$'
+              AND EXISTS (
+                SELECT 1 FROM form_options f
+                WHERE f.type='curriculum_name'
+                  AND f.id = CAST(ei.curriculum_name AS UNSIGNED)
+                  AND f.label = :cur
+              )
+            )
+          )
+      AND ei.student_group = :grp
+    ORDER BY student_name
+  ";
+  $st=$pdo->prepare($sql);
+  $st->execute([':cur'=>$sig['curriculum_value'], ':grp'=>$sig['group_name']]);
   return $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
 }
+
 function groupInfo(PDO $pdo, $group_id, $uid, $is_admin, $is_teacher){
   $base="SELECT cg.*, t.name AS teacher_name
          FROM course_groups cg
@@ -254,6 +303,7 @@ if (isset($_GET['ajax'])){
     <?php exit;
   }
 
+  /* === ค้นหารายชื่อนักศึกษาที่ “ยังไม่อยู่กลุ่มนี้” เพื่อเพิ่มเข้าไป (ใช้ education_info + personal_info) === */
   if ($ajax==='student_options'){
     header('Content-Type: text/html; charset=utf-8');
     if(!$is_admin){ echo 'permission denied'; exit; }
@@ -262,14 +312,28 @@ if (isset($_GET['ajax'])){
     $sig=groupSignature($pdo,$gid);
     if(!$sig){ echo '<div class="muted">ไม่พบกลุ่ม</div>'; exit; }
 
-    $nameExpr=studentNameExpr($pdo); $codeExpr=studentCodeExpr($pdo);
-
-    $sql="SELECT s.student_id, {$codeExpr} AS student_code, {$nameExpr} AS student_name
-          FROM education_info ei
-          INNER JOIN students s ON s.student_id=ei.student_id
-          WHERE ei.curriculum_name=:cur
-            AND (ei.student_group IS NULL OR ei.student_group<>:grp)";
-    if ($q !== '') $sql.=" AND ({$nameExpr} LIKE :kw OR {$codeExpr} LIKE :kw)";
+    $sql = "
+      SELECT 
+        ei.student_id,
+        CAST(ei.student_id AS CHAR) AS student_code,
+        COALESCE(NULLIF(TRIM(p.full_name),''), CAST(ei.student_id AS CHAR)) AS student_name
+      FROM education_info ei
+      INNER JOIN personal_info p ON p.id = ei.personal_id
+      WHERE (
+              ei.curriculum_name = :cur
+              OR (
+                ei.curriculum_name REGEXP '^[0-9]+$'
+                AND EXISTS (
+                  SELECT 1 FROM form_options f
+                  WHERE f.type='curriculum_name'
+                    AND f.id = CAST(ei.curriculum_name AS UNSIGNED)
+                    AND f.label = :cur
+                )
+              )
+            )
+        AND (ei.student_group IS NULL OR ei.student_group <> :grp)
+    ";
+    if ($q !== '') $sql.=" AND (p.full_name LIKE :kw OR CAST(ei.student_id AS CHAR) LIKE :kw)";
     $sql.=" ORDER BY student_name LIMIT 300";
     $st=$pdo->prepare($sql);
     $st->bindValue(':cur',$sig['curriculum_value']);

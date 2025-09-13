@@ -1,16 +1,15 @@
-<?php 
+<?php
 /* ===========================================================
-  manage_courses.php (v6-course_id) 
-  - ใช้คีย์หลัก course_id (ไม่เปลี่ยนชื่อคอลัมน์)
-  - รองรับฟิลด์ใหม่: recommended_year, is_compulsory, prereq_text
-  - Bulk Add / CSV Import รองรับปีแนะนำ/วิชาบังคับ/เงื่อนไข
-  - แก้จุดลบ/แก้ไขคอร์สให้ทำงานด้วย course_id ทุกจุด
-  - หน้า Options: เพิ่ม del_opt (ลบ option) และตัดโค้ดที่พลาดลบคอร์สออก
+  manage_courses.php (v6-course_id) — LABEL-FIRST Edition (rev+programs_api)
+  - form_options เก็บ parent_value = id ของ parent
+  - API รับ parent เป็น label/id ได้ และส่ง value=label เสมอ
+  - เพิ่ม ajax: programs, programs_by_faculty ให้ฝั่งโปรไฟล์ใช้งาน
+  - PRIMARY KEY: courses.course_id (เดิม)
   =========================================================== */
 session_start();
 $HOME_URL = 'admin_dashboard.php';
 
-/* >>> NEW badge session bucket */
+/* >>> "ใหม่!" badge session bucket */
 if (!isset($_SESSION['hot_new_option_ids'])) { $_SESSION['hot_new_option_ids'] = []; }
 function _remember_new_opt($id){
   if (!isset($_SESSION['hot_new_option_ids'])) $_SESSION['hot_new_option_ids'] = [];
@@ -27,7 +26,7 @@ try {
   $pdo = new PDO("mysql:host=$DB_HOST;dbname=$DB_NAME;charset=utf8mb4",$DB_USER,$DB_PASS,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
 } catch(PDOException $e){ die('DB Connection failed: '.htmlspecialchars($e->getMessage())); }
 
-/* ===== form_options (enum+unique+created_at) ===== */
+/* ===== form_options ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS form_options (
   id INT AUTO_INCREMENT PRIMARY KEY,
   type ENUM(
@@ -36,7 +35,7 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS form_options (
     'student_status','education_term','education_year'
   ) NOT NULL,
   label VARCHAR(255) NOT NULL,
-  parent_value VARCHAR(100) DEFAULT NULL,
+  parent_value VARCHAR(100) DEFAULT NULL, -- เก็บ id ของ parent
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_type_label_parent (type, label, parent_value)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
@@ -70,81 +69,122 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS courses (
   prereq_text VARCHAR(255) NULL,
   UNIQUE KEY uniq_course_code (course_code)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
-/* เงียบๆ ถ้ามีอยู่แล้ว */
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_name_value VARCHAR(100) NULL"); } catch(Throwable $e) {}
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN curriculum_year_value VARCHAR(100) NULL"); } catch(Throwable $e) {}
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN is_compulsory TINYINT(1) NOT NULL DEFAULT 0"); } catch(Throwable $e) {}
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN recommended_year TINYINT NULL"); } catch(Throwable $e) {}
 try { $pdo->exec("ALTER TABLE courses ADD COLUMN prereq_text VARCHAR(255) NULL"); } catch(Throwable $e) {}
 
-/* ---------- PUBLIC API ---------- */
-if (isset($_GET['ajax']) && in_array($_GET['ajax'], ['meta','majors_by_faculty'], true)) {
-  header('Content-Type: application/json; charset=utf-8');
-  $getOpts = function(PDO $pdo, $type, $parent=null){
-    $sql = "SELECT id AS value, label FROM form_options WHERE type=?";
-    $params = [$type];
-    if ($parent!==null){ $sql .= " AND parent_value=?"; $params[] = $parent; }
-    $sql .= " ORDER BY label";
-    $st=$pdo->prepare($sql); $st->execute($params);
-    return $st->fetchAll(PDO::FETCH_ASSOC);
-  };
-
-  if ($_GET['ajax']==='majors_by_faculty') {
-    $fac = $_GET['faculty'] ?? '';
-    echo json_encode(['majors'=>$getOpts($pdo,'major',$fac)], JSON_UNESCAPED_UNICODE); exit;
-  }
-  
-  echo json_encode([
-    'faculties' => $getOpts($pdo,'faculty'),
-    'levels'    => $getOpts($pdo,'education_level'),
-    'ptypes'    => $getOpts($pdo,'program_type'),
-    'curnames'  => $getOpts($pdo,'curriculum_name'),
-    'curyears'  => $getOpts($pdo,'curriculum_year'),
-    'groups'    => $getOpts($pdo,'student_group'),
-    'statuses'  => $getOpts($pdo,'student_status'),
-    'student_status' => $getOpts($pdo,'student_status'),
-    'terms'     => $getOpts($pdo,'education_term'),
-  ], JSON_UNESCAPED_UNICODE);
-  exit;
-}
-
-/* ---------- PUBLIC API (ต่อจาก majors_by_faculty) ---------- */
-
-// 2) programs_by_major
-if (isset($_GET['ajax']) && $_GET['ajax'] === 'programs_by_major') {
-  header('Content-Type: application/json; charset=utf-8');
-  $major = $_GET['major'] ?? '';
-  // ดึง program โดยอิง parent_value = id ของ major
-  $st = $pdo->prepare("SELECT id AS value, label 
-                       FROM form_options 
-                       WHERE type='program' AND parent_value = ?
-                       ORDER BY label");
-  $st->execute([$major]);
-  echo json_encode(['programs' => $st->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
-  exit;
-}
-
-// 3) groups_by_program
-if (isset($_GET['ajax']) && $_GET['ajax'] === 'groups_by_program') {
-  header('Content-Type: application/json; charset=utf-8');
-  $program = $_GET['program'] ?? '';
-  // ดึง student_group โดยอิง parent_value = id ของ program
-  $st = $pdo->prepare("SELECT id AS value, label 
-                       FROM form_options 
-                       WHERE type='student_group' AND parent_value = ?
-                       ORDER BY label");
-  $st->execute([$program]);
-  echo json_encode(['groups' => $st->fetchAll(PDO::FETCH_ASSOC)], JSON_UNESCAPED_UNICODE);
-  exit;
-}
-
-
-/* ===== Utils / Auth ===== */
+/* ===== Helpers ===== */
 function e($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token']=bin2hex(random_bytes(32));
 function flash($t,$m){ $_SESSION['flash'][]=['t'=>$t,'m'=>$m]; }
 $flashes = $_SESSION['flash'] ?? []; unset($_SESSION['flash']);
 if (empty($_SESSION['loggedin'])) { header('Location: login.php?error=unauthorized'); exit; }
+
+/* mapIdToLabel: ถ้า v เป็นเลข → map เป็น label; ถ้าเป็นตัวหนังสืออยู่แล้ว → คืนเดิม */
+function mapIdToLabel(PDO $pdo, string $type, $v) {
+  $v = is_string($v) ? trim($v) : $v;
+  if ($v === '' || $v === null) return $v;
+  if (!preg_match('/^[0-9]+$/', (string)$v)) return $v; // already label
+  $st = $pdo->prepare("SELECT label FROM form_options WHERE id=? AND type=?");
+  $st->execute([$v, $type]);
+  return $st->fetchColumn() ?: $v;
+}
+/* labelToId: สำหรับ parent_value lookups ใน API */
+function labelToId(PDO $pdo, string $type, $maybeLabelOrId) {
+  $x = is_string($maybeLabelOrId) ? trim($maybeLabelOrId) : $maybeLabelOrId;
+  if ($x === '' || $x === null) return null;
+  if (preg_match('/^[0-9]+$/', (string)$x)) return (string)$x; // already id
+  $st = $pdo->prepare("SELECT id FROM form_options WHERE type=? AND label=? LIMIT 1");
+  $st->execute([$type, $x]);
+  $id = $st->fetchColumn();
+  return $id ? (string)$id : null;
+}
+
+/* ---------- PUBLIC API (meta + chained options) ---------- */
+if (isset($_GET['ajax']) && in_array($_GET['ajax'], [
+  'meta','majors_by_faculty','programs_by_major','groups_by_program',
+  /* ใหม่ */ 'programs','programs_by_faculty'
+], true)) {
+  header('Content-Type: application/json; charset=utf-8');
+
+  // utility: ดึง options แบบ value=label (+parent filter ด้วย id)
+  $getOpts = function(PDO $pdo, $type, $parentType = null, $parent = null){
+    $sql = "SELECT label AS value, label FROM form_options WHERE type=?";
+    $params = [$type];
+    if ($parentType !== null) {
+      $pid = labelToId($pdo, $parentType, $parent);
+      if ($pid !== null) { $sql .= " AND parent_value=?"; $params[] = $pid; }
+    }
+    $sql .= " ORDER BY label";
+    $st=$pdo->prepare($sql); $st->execute($params);
+    return $st->fetchAll(PDO::FETCH_ASSOC);
+  };
+
+  $ajax = $_GET['ajax'];
+
+  // 1) majors_by_faculty (รับ faculty = label/id)
+  if ($ajax === 'majors_by_faculty') {
+    $fac = $_GET['faculty'] ?? '';
+    echo json_encode(['majors'=>$getOpts($pdo,'major','faculty',$fac)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // 2) programs_by_major (รับ major = label/id)
+  if ($ajax === 'programs_by_major') {
+    $major = $_GET['major'] ?? '';
+    echo json_encode(['programs'=>$getOpts($pdo,'program','major',$major)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // 3) groups_by_program (รับ program = label/id)
+  if ($ajax === 'groups_by_program') {
+    $program = $_GET['program'] ?? '';
+    echo json_encode(['groups'=>$getOpts($pdo,'student_group','program',$program)], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // 4) programs (ทั้งหมด)
+  if ($ajax === 'programs') {
+    echo json_encode(['programs'=>$getOpts($pdo,'program')], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // 5) programs_by_faculty (รับ faculty = label/id) — หา programs ทุกตัวที่อยู่ใต้ faculty นั้นผ่าน major
+  if ($ajax === 'programs_by_faculty') {
+    $fac = $_GET['faculty'] ?? '';
+    $fac_id = labelToId($pdo, 'faculty', $fac);
+
+    $rows = [];
+    if ($fac_id !== null) {
+      // หา majors ใต้ faculty นี้
+      $st = $pdo->prepare("SELECT id FROM form_options WHERE type='major' AND parent_value=?");
+      $st->execute([$fac_id]);
+      $majorIds = $st->fetchAll(PDO::FETCH_COLUMN);
+
+      if (!empty($majorIds)) {
+        $in = implode(',', array_fill(0, count($majorIds), '?'));
+        $sql = "SELECT label AS value, label FROM form_options WHERE type='program' AND parent_value IN ($in) ORDER BY label";
+        $st2 = $pdo->prepare($sql);
+        $st2->execute($majorIds);
+        $rows = $st2->fetchAll(PDO::FETCH_ASSOC);
+      }
+    }
+    echo json_encode(['programs'=>$rows], JSON_UNESCAPED_UNICODE); exit;
+  }
+
+  // meta (รวมภาพรวมให้ฟอร์ม — ตัด student_status ออกจาก meta เพื่อลดสับสน)
+  if ($ajax === 'meta') {
+    echo json_encode([
+      'faculties' => $getOpts($pdo,'faculty'),
+      'levels'    => $getOpts($pdo,'education_level'),
+      'ptypes'    => $getOpts($pdo,'program_type'),
+      'curnames'  => $getOpts($pdo,'curriculum_name'),
+      'curyears'  => $getOpts($pdo,'curriculum_year'),
+      'groups'    => $getOpts($pdo,'student_group'),
+      'terms'     => $getOpts($pdo,'education_term'),
+      /* ใหม่ */  'programs'  => $getOpts($pdo,'program'),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+  }
+}
 
 /* ===== Router ===== */
 $view = $_GET['view'] ?? 'courses';
@@ -180,7 +220,7 @@ if (isset($_GET['export'])) {
   fclose($out); exit;
 }
 
-/* ===== Global option lists ===== */
+/* ===== Global option lists (สำหรับเรนเดอร์ฟอร์ม) ===== */
 $all_opts_rows = $pdo->query(
   "SELECT id,label,type,parent_value,created_at FROM form_options ORDER BY type, label"
 )->fetchAll(PDO::FETCH_ASSOC);
@@ -188,7 +228,7 @@ $optByType = [];
 $value_to_label_map_global = [];
 foreach($all_opts_rows as $row){
   $optByType[$row['type']][] = $row;
-  $value_to_label_map_global[$row['id']] = $row['label'];
+  $value_to_label_map_global[(string)$row['id']] = $row['label'];
 }
 
 /* ===========================================================
@@ -202,11 +242,11 @@ if ($view === 'courses') {
 
     // ===== IMPORT COURSES from CSV =====
     if ($act === 'import_csv') {
-      $faculty = trim($_POST['faculty_value'] ?? '') ?: null;
-      $major   = trim($_POST['major_value'] ?? '') ?: null;
-      $program = trim($_POST['program_value'] ?? '') ?: null;
-      $curName = trim($_POST['curriculum_name_value'] ?? '') ?: null;
-      $curYear = trim($_POST['curriculum_year_value'] ?? '') ?: null;
+      $faculty = mapIdToLabel($pdo,'faculty',         trim($_POST['faculty_value'] ?? '') ?: null);
+      $major   = mapIdToLabel($pdo,'major',           trim($_POST['major_value'] ?? '') ?: null);
+      $program = mapIdToLabel($pdo,'program',         trim($_POST['program_value'] ?? '') ?: null);
+      $curName = mapIdToLabel($pdo,'curriculum_name', trim($_POST['curriculum_name_value'] ?? '') ?: null);
+      $curYear = mapIdToLabel($pdo,'curriculum_year', trim($_POST['curriculum_year_value'] ?? '') ?: null);
 
       if (!isset($_FILES['csv']) || $_FILES['csv']['error'] !== UPLOAD_ERR_OK) {
         flash('danger', 'อัปโหลดไฟล์ไม่สำเร็จ'); header('Location: '.$_SERVER['PHP_SELF'].'?view=courses'); exit;
@@ -221,7 +261,6 @@ if ($view === 'courses') {
       $success=0; $skipped=0; $line=0;
       $pdo->beginTransaction();
       try {
-        /* รองรับคอลัมน์: code,name,credits,[recommended_year],[is_compulsory],[prereq_text] */
         $st = $pdo->prepare("INSERT IGNORE INTO courses(
           course_code,course_name,credits,
           faculty_value,major_value,program_value,curriculum_name_value,curriculum_year_value,
@@ -260,11 +299,11 @@ if ($view === 'courses') {
     // ===== BULK ADD =====
     if ($act === 'add_bulk') {
       $bulk_data = trim($_POST['bulk_courses_data'] ?? '');
-      $faculty = trim($_POST['faculty_value'] ?? '') ?: null;
-      $major   = trim($_POST['major_value'] ?? '') ?: null;
-      $program = trim($_POST['program_value'] ?? '') ?: null;
-      $curName = trim($_POST['curriculum_name_value'] ?? '') ?: null;
-      $curYear = trim($_POST['curriculum_year_value'] ?? '') ?: null;
+      $faculty = mapIdToLabel($pdo,'faculty',         trim($_POST['faculty_value'] ?? '') ?: null);
+      $major   = mapIdToLabel($pdo,'major',           trim($_POST['major_value'] ?? '') ?: null);
+      $program = mapIdToLabel($pdo,'program',         trim($_POST['program_value'] ?? '') ?: null);
+      $curName = mapIdToLabel($pdo,'curriculum_name', trim($_POST['curriculum_name_value'] ?? '') ?: null);
+      $curYear = mapIdToLabel($pdo,'curriculum_year', trim($_POST['curriculum_year_value'] ?? '') ?: null);
 
       if (empty($bulk_data)) {
         flash('danger', 'กรุณาใส่ข้อมูลรายวิชา');
@@ -313,17 +352,18 @@ if ($view === 'courses') {
       }
     }
 
-    // ===== EDIT COURSE (by course_id) =====
+    // ===== EDIT COURSE =====
     if ($act === 'edit') {
       $course_id = (int)($_POST['course_id'] ?? 0);
       $code    = trim($_POST['course_code'] ?? '');
       $name    = trim($_POST['course_name'] ?? '');
       $credits = isset($_POST['credits']) ? (float)$_POST['credits'] : 3.0;
-      $faculty = trim($_POST['faculty_value'] ?? '') ?: null;
-      $major   = trim($_POST['major_value'] ?? '') ?: null;
-      $program = trim($_POST['program_value'] ?? '') ?: null;
-      $curName = trim($_POST['curriculum_name_value'] ?? '') ?: null;
-      $curYear = trim($_POST['curriculum_year_value'] ?? '') ?: null;
+
+      $faculty = mapIdToLabel($pdo,'faculty',         trim($_POST['faculty_value'] ?? '') ?: null);
+      $major   = mapIdToLabel($pdo,'major',           trim($_POST['major_value'] ?? '') ?: null);
+      $program = mapIdToLabel($pdo,'program',         trim($_POST['program_value'] ?? '') ?: null);
+      $curName = mapIdToLabel($pdo,'curriculum_name', trim($_POST['curriculum_name_value'] ?? '') ?: null);
+      $curYear = mapIdToLabel($pdo,'curriculum_year', trim($_POST['curriculum_year_value'] ?? '') ?: null);
 
       $isComp = isset($_POST['is_compulsory']) ? 1 : 0;
       $recYear = isset($_POST['recommended_year']) && $_POST['recommended_year'] !== '' ? (int)$_POST['recommended_year'] : null;
@@ -361,7 +401,7 @@ if ($view === 'courses') {
       }
     }
 
-    // ===== DELETE COURSE (by course_id) =====
+    // ===== DELETE COURSE =====
     if ($act === 'delete') {
       $course_id = (int)($_POST['course_id'] ?? 0);
       if ($course_id > 0) {
@@ -508,7 +548,7 @@ if ($view === 'options') {
       } else { flash('danger', 'ข้อมูลสำหรับแก้ไขไม่ถูกต้อง'); }
     }
 
-    // ===== DELETE option (del_opt) =====
+    // ===== DELETE option =====
     if ($act==='del_opt') {
       $id = (int)($_POST['opt_id'] ?? 0);
       if ($id>0){
@@ -535,7 +575,7 @@ if ($view === 'options') {
   $value_to_label_map = [];
   foreach ($all_opts as $o) {
     $grouped_opts[$o['type']][] = $o;
-    $value_to_label_map[$o['id']] = $o['label'];
+    $value_to_label_map[(string)$o['id']] = $o['label'];
   }
   
   $faculties_for_dropdown = $grouped_opts['faculty'] ?? [];
@@ -556,6 +596,7 @@ $programs_for_modal  = $optByType['program'] ?? [];
 <title><?php echo $view==='options'?'ตัวเลือกลงทะเบียน':'แก้ไขรายวิชา'; ?></title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
+/* (คงดีไซน์เดิมทั้งหมด) */
 :root{--navy:#0f1419;--steel:#1e293b;--slate:#334155;--sky:#0ea5e9;--cyan:#06b6d4;--emerald:#10b981;--amber:#f59e0b;--orange:#ea580c;--rose:#e11d48;--text:#f1f5f9;--muted:#94a3b8;--subtle:#64748b;--border:#374151;--glass:rgba(15,20,25,.85);--overlay:rgba(0,0,0,.6);--shadow-sm:0 2px 8px rgba(0,0,0,.1);--shadow:0 4px 20px rgba(0,0,0,.15);--shadow-lg:0 8px 32px rgba(0,0,0,.25);--gradient-primary:linear-gradient(135deg,var(--sky),var(--cyan));--gradient-secondary:linear-gradient(135deg,var(--slate),var(--steel));--gradient-accent:linear-gradient(135deg,var(--amber),var(--orange));--gradient-success:linear-gradient(135deg,var(--emerald),#059669);--gradient-danger:linear-gradient(135deg,var(--rose),#be123c);}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -580,7 +621,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
 .header{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:start;margin-bottom:24px;padding:24px;border-radius:20px;background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--border);}
 .header-content h2{font-size:32px;font-weight:800;margin-bottom:8px;background:var(--gradient-primary);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .header-content p{color:var(--muted);font-size:16px;line-height:1.5}
-.input,.select,textarea{width:100%;padding:14px 16px;border-radius:14px;border:1px solid var(--border);background:rgba(15,20,25,.6);color:var(--text);outline:none;font-size:14px;transition:all .3s ease;backdrop-filter:blur(10px);font-family:inherit;}
+.input,.select,textarea{width:100%;padding:14px 16px;border-radius:14px;border:1px solid var(--border);background:rgba(15,20,25,.6);color:var(--text);outline:none;font-size:14px;transition:all .3s.ease;backdrop-filter:blur(10px);font-family:inherit;}
 .input:focus,.select:focus,textarea:focus{border-color:var(--sky);box-shadow:0 0 0 3px rgba(14,165,233,.2);background:rgba(15,20,25,.8);}
 .btn{padding:14px 20px;border-radius:14px;border:1px solid var(--border);cursor:pointer;text-decoration:none;font-weight:600;font-size:14px;display:inline-flex;align-items:center;gap:10px;transition:all .3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden;backdrop-filter:blur(10px);}
 .btn:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
@@ -598,12 +639,13 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
 .table tbody tr:hover{background:rgba(14,165,233,.03);box-shadow:inset 0 0 0 1px rgba(14,165,233,.1);}
 .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:600;background:var(--gradient-secondary);border:1px solid var(--border);box-shadow:var(--shadow-sm);}
 .alert{padding:16px 20px;border-radius:16px;margin:16px 0;border:1px solid;display:flex;align-items:center;gap:12px;backdrop-filter:blur(10px);font-weight:500;animation:slideIn .4s ease-out;}
-@keyframes slideIn{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:translateX(0)}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-20px)}to{opacity:1;transform:translateX(0)}
+}
 .ok{background:rgba(16,185,129,.15);border-color:rgba(16,185,129,.3);color:var(--emerald);}
 .ok::before{content:'✅'}
 .dangerBox{background:rgba(225,29,72,.15);border-color:rgba(225,29,72,.3);color:var(--rose);}
 .dangerBox::before{content:'⚠️'}
-.modal{display:none;position:fixed;inset:0;background:var(--overlay);z-index:1000;padding:20px;backdrop-filter:blur(8px);animation:modalFadeIn .3s ease-out;overflow-y:auto; align-items:center; justify-content:center;}
+.modal{display:none;position:fixed;inset:0;background:var(--overlay);z-index:1000;padding:20px;backdrop-filter:blur(8px);animation:modalFadeIn .3s.ease-out;overflow-y:auto; align-items:center; justify-content:center;}
 @keyframes modalFadeIn{from{opacity:0}to{opacity:1}}
 .modal-content{background:linear-gradient(145deg,var(--navy),var(--steel));color:var(--text);margin:0 auto;padding:32px;border-radius:24px;width:100%;max-width:600px;box-shadow:var(--shadow-lg);border:1px solid var(--border);backdrop-filter:blur(20px);animation:modalSlideIn .3s ease-out;}
 @keyframes modalSlideIn{from{opacity:0;transform:scale(.9) translateY(20px)}to{opacity:1;transform:scale(1) translateY(0)}
@@ -667,7 +709,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
             <select name="curriculum_name_value" class="select">
               <option value="">— ไม่ระบุ —</option>
               <?php foreach($curNames as $cn): ?>
-                <option value="<?php echo e($cn['id']); ?>"><?php echo e($cn['label']); ?></option>
+                <option value="<?php echo e($cn['label']); ?>"><?php echo e($cn['label']); ?></option>
               <?php endforeach; ?>
             </select>
           </div>
@@ -676,7 +718,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
             <select name="curriculum_year_value" class="select">
               <option value="">— ไม่ระบุ —</option>
               <?php foreach($curYears as $cy): ?>
-                <option value="<?php echo e($cy['id']); ?>"><?php echo e($cy['label']); ?></option>
+                <option value="<?php echo e($cy['label']); ?>"><?php echo e($cy['label']); ?></option>
               <?php endforeach; ?>
             </select>
           </div>
@@ -688,9 +730,9 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
         </div>
 
         <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
-          <div class="form-field" style="margin-bottom:0;"><label>คณะ (ผูกให้ทุกแถว)</label><select name="faculty_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($faculties as $f): ?><option value="<?php echo e($f['id']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
-          <div class="form-field" style="margin-bottom:0;"><label>สาขา (ผูกให้ทุกแถว)</label><select name="major_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($majors as $m): ?><option value="<?php echo e($m['id']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
-          <div class="form-field" style="margin-bottom:0;"><label>สาขาวิชา (ผูกให้ทุกแถว)</label><select name="program_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($programs as $p): ?><option value="<?php echo e($p['id']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
+          <div class="form-field" style="margin-bottom:0;"><label>คณะ (ผูกให้ทุกแถว)</label><select name="faculty_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($faculties as $f): ?><option value="<?php echo e($f['label']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
+          <div class="form-field" style="margin-bottom:0;"><label>สาขา (ผูกให้ทุกแถว)</label><select name="major_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($majors as $m): ?><option value="<?php echo e($m['label']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
+          <div class="form-field" style="margin-bottom:0;"><label>สาขาวิชา (ผูกให้ทุกแถว)</label><select name="program_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($programs as $p): ?><option value="<?php echo e($p['label']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
         </div>
 
         <div style="display:flex; justify-content:flex-end;">
@@ -721,7 +763,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
           <select name="curriculum_name_value" class="select">
             <option value="">— ไม่ระบุ —</option>
             <?php foreach($curNames as $cn): ?>
-              <option value="<?php echo e($cn['id']); ?>"><?php echo e($cn['label']); ?></option>
+              <option value="<?php echo e($cn['label']); ?>"><?php echo e($cn['label']); ?></option>
             <?php endforeach; ?>
           </select>
         </div>
@@ -730,15 +772,15 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
           <select name="curriculum_year_value" class="select">
             <option value="">— ไม่ระบุ —</option>
             <?php foreach($curYears as $cy): ?>
-              <option value="<?php echo e($cy['id']); ?>"><?php echo e($cy['label']); ?></option>
+              <option value="<?php echo e($cy['label']); ?>"><?php echo e($cy['label']); ?></option>
             <?php endforeach; ?>
           </select>
         </div>
 
         <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-top:16px;">
-            <div class="form-field" style="margin-bottom:0;"><label>สังกัดคณะ (สำหรับทุกวิชาที่เพิ่ม)</label><select name="faculty_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($faculties as $f): ?><option value="<?php echo e($f['id']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
-            <div class="form-field" style="margin-bottom:0;"><label>สังกัดสาขา (สำหรับทุกวิชาที่เพิ่ม)</label><select name="major_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($majors as $m): ?><option value="<?php echo e($m['id']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
-            <div class="form-field" style="margin-bottom:0;"><label>สังกัดสาขาวิชา (สำหรับทุกวิชาที่เพิ่ม)</label><select name="program_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($programs as $p): ?><option value="<?php echo e($p['id']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
+            <div class="form-field" style="margin-bottom:0;"><label>สังกัดคณะ (สำหรับทุกวิชาที่เพิ่ม)</label><select name="faculty_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($faculties as $f): ?><option value="<?php echo e($f['label']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
+            <div class="form-field" style="margin-bottom:0;"><label>สังกัดสาขา (สำหรับทุกวิชาที่เพิ่ม)</label><select name="major_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($majors as $m): ?><option value="<?php echo e($m['label']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
+            <div class="form-field" style="margin-bottom:0;"><label>สังกัดสาขาวิชา (สำหรับทุกวิชาที่เพิ่ม)</label><select name="program_value" class="select"><option value="">— ไม่ระบุ —</option><?php foreach($programs as $p): ?><option value="<?php echo e($p['label']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
         </div>
         
         <div style="display:flex; justify-content:flex-end; margin-top:20px;">
@@ -779,11 +821,11 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
           </td>
           <td><?php
             $parts = [];
-            if (!empty($c['faculty_value'])) { $parts[] = $value_to_label_map_global[$c['faculty_value']] ?? $c['faculty_value']; }
-            if (!empty($c['major_value']))   { $parts[] = $value_to_label_map_global[$c['major_value']] ?? $c['major_value']; }
-            if (!empty($c['program_value'])) { $parts[] = $value_to_label_map_global[$c['program_value']] ?? $c['program_value']; }
-            if (!empty($c['curriculum_name_value'])) { $parts[] = 'หลักสูตร: '.($value_to_label_map_global[$c['curriculum_name_value']] ?? $c['curriculum_name_value']); }
-            if (!empty($c['curriculum_year_value'])) { $parts[] = 'ปี: '.($value_to_label_map_global[$c['curriculum_year_value']] ?? $c['curriculum_year_value']); }
+            if (!empty($c['faculty_value'])) { $parts[] = $value_to_label_map_global[(string)$c['faculty_value']] ?? $c['faculty_value']; }
+            if (!empty($c['major_value']))   { $parts[] = $value_to_label_map_global[(string)$c['major_value']] ?? $c['major_value']; }
+            if (!empty($c['program_value'])) { $parts[] = $value_to_label_map_global[(string)$c['program_value']] ?? $c['program_value']; }
+            if (!empty($c['curriculum_name_value'])) { $parts[] = 'หลักสูตร: '.($value_to_label_map_global[(string)$c['curriculum_name_value']] ?? $c['curriculum_name_value']); }
+            if (!empty($c['curriculum_year_value'])) { $parts[] = 'ปี: '.($value_to_label_map_global[(string)$c['curriculum_year_value']] ?? $c['curriculum_year_value']); }
             if (!empty($c['prereq_text'])) { $parts[] = 'เงื่อนไข: '.e($c['prereq_text']); }
             echo $parts ? '<span class="badge">'.e(implode(' › ', $parts)).'</span>' : '<span style="color:var(--subtle);font-size:12px">—</span>';
           ?></td>
@@ -861,7 +903,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
                 <h4 style="font-size:16px;font-weight:700;color:var(--sky)">
                   <?php
                     if ($parentId==='__NONE__') { echo 'ไม่มีกลุ่ม'; }
-                    else { echo 'กลุ่ม: '.e($id2label[$parentId] ?? $parentId); }
+                    else { echo 'กลุ่ม: '.e($id2label[(string)$parentId] ?? $parentId); }
                   ?>
                 </h4>
                 <span class="badge"><?php echo count($items); ?> รายการ</span>
@@ -998,7 +1040,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
                   </td>
                   <?php if (in_array($type, ['major', 'program', 'student_group'])): ?>
                   <td>
-                    <?php if($o['parent_value']): $parent_label = $value_to_label_map[$o['parent_value']] ?? $o['parent_value']; ?>
+                    <?php if($o['parent_value']): $parent_label = $value_to_label_map[(string)$o['parent_value']] ?? $o['parent_value']; ?>
                       <span class="badge" style="background:rgba(245,158,11,.15);color:var(--amber);"><?php echo e($parent_label); ?></span>
                     <?php else: ?>
                       <span style="color:var(--subtle);font-size:12px">—</span>
@@ -1048,7 +1090,7 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
                 <input type="hidden" name="csrf_token" value="<?php echo e($_SESSION['csrf_token']); ?>">
                 <input type="hidden" name="action_opt" value="add_opt">
                 <input type="hidden" name="opt_type" value="program">
-                <div class="form-field" style="margin-bottom:0;">
+                <div class="form-field" style="margin-bottom:0%;">
                   <label for="opt_parent_program">สังกัดสาขา</label>
                   <select id="opt_parent_program" name="opt_parent" class="select" required>
                     <option value="">— เลือกสาขา —</option>
@@ -1098,15 +1140,16 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
         <input type="hidden" name="action_opt" value="edit_opt">
         <input type="hidden" name="opt_id" id="edit_opt_id">
         <div class="form-field"><label for="edit_opt_label">ชื่อข้อมูล</label><input type="text" name="opt_label" id="edit_opt_label" class="input" required></div>
+        <!-- parent เป็น id ตามโครงสร้าง -->
         <div id="edit_parent_major_container" class="form-field" style="display:none;"><label for="edit_opt_parent_major">สังกัดคณะ</label><select name="opt_parent" id="edit_opt_parent_major" class="select"><?php foreach ($faculties_for_modal as $fac): ?><option value="<?php echo e($fac['id']); ?>"><?php echo e($fac['label']); ?></option><?php endforeach; ?></select></div>
         <div id="edit_parent_program_container" class="form-field" style="display:none;"><label for="edit_opt_parent_program">สังกัดสาขา</label><select name="opt_parent" id="edit_opt_parent_program" class="select"><?php foreach ($majors_for_modal as $maj): ?><option value="<?php echo e($maj['id']); ?>"><?php echo e($maj['label']); ?></option><?php endforeach; ?></select></div>
         <div id="edit_parent_group_container" class="form-field" style="display:none;"><label for="edit_opt_parent_group">สังกัดสาขาวิชา</label><select name="opt_parent" id="edit_opt_parent_group" class="select"><?php foreach ($programs_for_modal as $prog): ?><option value="<?php echo e($prog['id']); ?>"><?php echo e($prog['label']); ?></option><?php endforeach; ?></select></div>
-        <div class="form-actions"><button type="button" class="btn secondary" onclick="closeModal('optionEditModal')">❌ ยกเลิก</button><button type="submit" class="btn primary">💾 บันทึก</button></div>
+        <div class="form-actions"><button type="button" class="btn secondary" onclick="closeModal('optionEditModal')">❌ ยกเลิก</button><button class="btn primary">💾 บันทึก</button></div>
     </form>
   </div>
 </div>
 
-<!-- ===== Modal: แก้ไขรายวิชา (use course_id) ===== -->
+<!-- ===== Modal: แก้ไขรายวิชา ===== -->
 <div id="courseEditModal" class="modal">
   <div class="modal-content">
     <div class="modal-header"><h3 id="courseEditTitle">แก้ไขรายวิชา</h3><button class="close" onclick="closeModal('courseEditModal')" aria-label="ปิด">&times;</button></div>
@@ -1117,15 +1160,15 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
       <div class="form-field"><label>รหัสวิชา</label><input class="input" name="course_code" id="course_edit_code" required></div>
       <div class="form-field"><label>ชื่อวิชา</label><input class="input" name="course_name" id="course_edit_name" required></div>
       <div class="form-field"><label>หน่วยกิต</label><input class="input" type="number" step="0.5" min="0" name="credits" id="course_edit_credits"></div>
-      <div class="form-field"><label>คณะ</label><select class="select" name="faculty_value" id="course_edit_fac"><option value="">— เลือก —</option><?php foreach($faculties_for_modal as $f): ?><option value="<?php echo e($f['id']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
-      <div class="form-field"><label>สาขา</label><select class="select" name="major_value" id="course_edit_maj"><option value="">— เลือก —</option><?php foreach($majors_for_modal as $m): ?><option value="<?php echo e($m['id']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
-      <div class="form-field"><label>สาขาวิชา</label><select class="select" name="program_value" id="course_edit_prog"><option value="">— เลือก —</option><?php foreach($programs_for_modal as $p): ?><option value="<?php echo e($p['id']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
+      <div class="form-field"><label>คณะ</label><select class="select" name="faculty_value" id="course_edit_fac"><option value="">— เลือก —</option><?php foreach($faculties_for_modal as $f): ?><option value="<?php echo e($f['label']); ?>"><?php echo e($f['label']); ?></option><?php endforeach; ?></select></div>
+      <div class="form-field"><label>สาขา</label><select class="select" name="major_value" id="course_edit_maj"><option value="">— เลือก —</option><?php foreach($majors_for_modal as $m): ?><option value="<?php echo e($m['label']); ?>"><?php echo e($m['label']); ?></option><?php endforeach; ?></select></div>
+      <div class="form-field"><label>สาขาวิชา</label><select class="select" name="program_value" id="course_edit_prog"><option value="">— เลือก —</option><?php foreach($programs_for_modal as $p): ?><option value="<?php echo e($p['label']); ?>"><?php echo e($p['label']); ?></option><?php endforeach; ?></select></div>
       <div class="form-field">
         <label>ชื่อหลักสูตร</label>
         <select class="select" name="curriculum_name_value" id="course_edit_curname">
           <option value="">— เลือก —</option>
           <?php foreach($curNames as $cn): ?>
-            <option value="<?php echo e($cn['id']); ?>"><?php echo e($cn['label']); ?></option>
+            <option value="<?php echo e($cn['label']); ?>"><?php echo e($cn['label']); ?></option>
           <?php endforeach; ?>
         </select>
       </div>
@@ -1134,12 +1177,11 @@ body{font-family:'Sarabun',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sa
         <select class="select" name="curriculum_year_value" id="course_edit_curyear">
           <option value="">— เลือก —</option>
           <?php foreach($curYears as $cy): ?>
-            <option value="<?php echo e($cy['id']); ?>"><?php echo e($cy['label']); ?></option>
+            <option value="<?php echo e($cy['label']); ?>"><?php echo e($cy['label']); ?></option>
           <?php endforeach; ?>
         </select>
       </div>
 
-      <!-- ใหม่: วิชาบังคับ / ปีแนะนำ / เงื่อนไข -->
       <div class="form-field">
         <label>วิชาบังคับ?</label>
         <label style="display:flex;align-items:center;gap:8px;">
@@ -1203,22 +1245,30 @@ if (optionModal) {
   optionModal.addEventListener('click', e => { if (e.target === optionModal) closeModal('optionEditModal'); });
 }
 
-// ===== COURSES: Edit modal (use data-course_id) =====
+// ===== ID→LABEL map สำหรับ modal แก้ไขรายวิชา (กันกรณีค่าปัจจุบันใน DB ยังเป็นเลข) =====
+const ID2LABEL = <?php echo json_encode($value_to_label_map_global, JSON_UNESCAPED_UNICODE); ?>;
+function toLabelMaybe(x){
+  if (!x) return '';
+  return /^[0-9]+$/.test(String(x)) ? (ID2LABEL[String(x)] ?? String(x)) : String(x);
+}
+
+// ===== COURSES: Edit modal =====
 function openCourseEditModal(btn){
   const d = btn.dataset;
   document.getElementById('course_edit_course_id').value = d.course_id || '';
   document.getElementById('course_edit_code').value = d.code || '';
   document.getElementById('course_edit_name').value = d.name || '';
   document.getElementById('course_edit_credits').value = d.credits || '3.0';
-  document.getElementById('course_edit_fac').value = d.faculty || '';
-  document.getElementById('course_edit_maj').value = d.major || '';
-  document.getElementById('course_edit_prog').value = d.program || '';
+
+  document.getElementById('course_edit_fac').value = toLabelMaybe(d.faculty);
+  document.getElementById('course_edit_maj').value  = toLabelMaybe(d.major);
+  document.getElementById('course_edit_prog').value = toLabelMaybe(d.program);
+  document.getElementById('course_edit_curname').value = toLabelMaybe(d.curname);
+  document.getElementById('course_edit_curyear').value = toLabelMaybe(d.curyear);
+
   document.getElementById('courseEditTitle').innerText =
     'แก้ไข: ' + (d.code ? d.code+' - ' : '') + (d.name||'');
-  document.getElementById('course_edit_curname').value = d.curname || '';
-  document.getElementById('course_edit_curyear').value = d.curyear || '';
 
-  // ใหม่:
   document.getElementById('course_edit_comp').checked = d.comp === '1';
   document.getElementById('course_edit_recyr').value = d.recyear || '';
   document.getElementById('course_edit_prereq').value = d.prereq || '';

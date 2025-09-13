@@ -6,7 +6,7 @@ $host = 'localhost';
 $username = 'root';
 $password = '';
 $database = 'studentregistration';
-$OPTIONS_API = 'course_management.php'; // ชี้ไปไฟล์แอดมินที่มี ajax=meta, majors_by_faculty
+$OPTIONS_API = 'course_management.php'; // ไฟล์ที่มี ajax=meta, majors_by_faculty, (และเราจะลอง programs / programs_by_faculty)
 $conn = new mysqli($host, $username, $password, $database);
 if ($conn->connect_error) die("การเชื่อมต่อล้มเหลว: " . $conn->connect_error);
 $conn->set_charset("utf8mb4");
@@ -18,14 +18,14 @@ $student_id = $_SESSION['student_id'];
 /* ---------- HELPERS ---------- */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
-/** map term เผื่อข้อมูลเก่ามาเป็น "1/2/ฤดูร้อน" → ใช้มาตรฐานเดียวกัน */
+/** map term "1/2/ฤดูร้อน" → มาตรฐานเดียวกัน */
 function normalize_term_for_ui($v){
   $v = trim((string)$v);
   if ($v==='1') return 'ภาคการศึกษาที่1';
   if ($v==='2') return 'ภาคการศึกษาที่2';
   if ($v==='3' || $v==='ฤดูร้อน') return 'ภาคการศึกษาที่3';
   if ($v==='ภาคการศึกษาที่1' || $v==='ภาคการศึกษาที่2' || $v==='ภาคการศึกษาที่3') return $v;
-  return ''; // unknown / ไม่ระบุ
+  return '';
 }
 /** ทำให้ค่าที่จะบันทึกเป็นรูปแบบมาตรฐานเดียวกัน */
 function normalize_term_for_db($v){
@@ -40,13 +40,13 @@ function normalize_term_for_db($v){
 /* ---------- LOAD CURRENT ---------- */
 $message = ''; $error = ''; $student = [];
 
-/* แก้เฉพาะตรงนี้: เปลี่ยน e.academic_year → e.education_year (คงทุกอย่างอื่นไว้เหมือนเดิม) */
+/* ดึงข้อมูล (เพิ่ม e.program และเอา student_status ออก) */
 $sql = "SELECT
           p.id AS personal_id, p.full_name, p.birthdate, p.gender, p.citizen_id,
           p.address, p.phone, p.email, p.profile_picture,
-          e.student_id, e.faculty, e.major, e.education_level,
+          e.student_id, e.faculty, e.major, e.program, e.education_level,
           e.curriculum_name, e.program_type, e.education_year,
-          e.student_group, e.gpa, e.student_status, e.education_term, e.education_year
+          e.student_group, e.gpa, e.education_term
         FROM personal_info p
         INNER JOIN education_info e ON p.id = e.personal_id
         WHERE e.student_id = ?
@@ -79,14 +79,12 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
   $education_level = trim($_POST['education_level'] ?? '');
   $curriculum_name = trim($_POST['curriculum_name'] ?? '');
   $program_type    = trim($_POST['program_type'] ?? '');
-  $education_year = trim($_POST['education_year'] ?? '');
+  $education_year  = trim($_POST['education_year'] ?? ''); // ใช้เป็นปีหลักสูตร/ปีการศึกษาที่แสดงในฟอร์ม
   $student_group   = trim($_POST['student_group'] ?? '');
   $gpa_in          = trim($_POST['gpa'] ?? '');
-  $student_status          = trim($_POST['student_status'] ?? '');
   $education_term  = normalize_term_for_db($_POST['education_term'] ?? '');
-  $education_year  = trim($_POST['education_year'] ?? '');
 
-  // ตรวจความถูกต้องเบื้องต้น
+  // ตรวจความถูกต้อง
   $validation = [];
   if ($full_name==='') $validation[] = "กรุณากรอกชื่อ-นามสกุล";
   if ($email!=='' && !filter_var($email, FILTER_VALIDATE_EMAIL)) $validation[] = "รูปแบบอีเมลไม่ถูกต้อง";
@@ -101,11 +99,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
     $upload_dir = __DIR__ . '/uploads/profile_images/';
     if (!is_dir($upload_dir)) mkdir($upload_dir, 0777, true);
 
-    $tmp = $_FILES['profile_picture']['tmp_name'];
-    $name = $_FILES['profile_picture']['name'];
+    $tmp  = $_FILES['profile_picture']['tmp_name'];
     $size = $_FILES['profile_picture']['size'];
 
-    // mime/type & ext
     $fi = new finfo(FILEINFO_MIME_TYPE);
     $mime = $fi->file($tmp);
     $ok_mimes = ['image/jpeg'=>'jpg','image/png'=>'png','image/gif'=>'gif','image/webp'=>'webp'];
@@ -117,7 +113,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
       $newname = $student_id.'_'.time().'.'.$ext;
       $dest = $upload_dir.$newname;
       if (move_uploaded_file($tmp, $dest)) {
-        // ลบของเก่า (ถ้าเป็นไฟล์ภายในโฟลเดอร์เดียวกัน)
         if (!empty($profile_picture)) {
           $old = $upload_dir.$profile_picture;
           if (is_file($old)) @unlink($old);
@@ -130,34 +125,35 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && empty($error)) {
   }
 
   if (empty($validation)) {
-    // ทำให้ GPA อนุญาตค่าว่าง (NULL)
     $gpa_str = ($gpa_in==='') ? '' : (string)floatval($gpa_in);
 
     $conn->begin_transaction();
     try {
-      // update personal_info
+      // personal_info
       $sql1 = "UPDATE personal_info
                SET full_name=?, birthdate=?, gender=?, citizen_id=?, address=?, phone=?, email=?, profile_picture=?
                WHERE id=?";
       $st1 = $conn->prepare($sql1);
-      $st1->bind_param('ssssssssi',
+      $st1->bind_param(
+        'ssssssssi',
         $full_name, $birthdate, $gender, $citizen_id, $address, $phone, $email, $profile_picture,
         $student['personal_id']
       );
       if (!$st1->execute()) throw new Exception('ไม่สามารถอัปเดตข้อมูลส่วนตัวได้');
       $st1->close();
 
-      // update education_info (gpa = NULLIF(?, ''))
+      // education_info (ไม่มี student_status, และมี program)
       $sql2 = "UPDATE education_info
-               SET faculty=?, major=?,program=?, education_level=?, curriculum_name=?,
+               SET faculty=?, major=?, program=?, education_level=?, curriculum_name=?,
                    program_type=?, education_year=?, student_group=?,
-                   gpa = NULLIF(?, ''), student_status=?, education_term=?, education_year=?
+                   gpa = NULLIF(?, ''), education_term=?
                WHERE personal_id=?";
       $st2 = $conn->prepare($sql2);
-      $st2->bind_param('sssssssssssi',
-        $faculty, $major, $education_level, $curriculum_name,
+      $st2->bind_param(
+        'ssssssssssi',
+        $faculty, $major, $program, $education_level, $curriculum_name,
         $program_type, $education_year, $student_group,
-        $gpa_str, $student_status, $education_term, $education_year,
+        $gpa_str, $education_term,
         $student['personal_id']
       );
       if (!$st2->execute()) throw new Exception('ไม่สามารถอัปเดตข้อมูลการศึกษาได้');
@@ -225,253 +221,51 @@ $term_ui = normalize_term_for_ui($student['education_term'] ?? '');
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --transition: all 0.2s ease-in-out;
 }
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-body {
-  font-family: 'Sarabun', sans-serif;
-  background-color: var(--body-bg);
-  color: var(--text-primary);
-  line-height: 1.6;
-}
-.navbar {
-  background-color: var(--card-bg);
-  color: var(--text-primary);
-  padding: 1rem 2rem;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  box-shadow: var(--shadow-sm);
-  border-bottom: 1px solid var(--border-color);
-}
-.navbar-brand {
-  font-weight: 700;
-  font-size: 1.25rem;
-  color: var(--primary-color);
-}
-.navbar-user {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-}
-.logout-btn {
-  background: none;
-  border: 1px solid var(--border-color);
-  color: var(--primary-color);
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius);
-  text-decoration: none;
-  transition: var(--transition);
-  margin-left: 1rem;
-}
-.logout-btn:hover {
-  background-color: var(--primary-color);
-  color: white;
-}
-.container {
-  max-width: 1100px;
-  margin: 2rem auto;
-  padding: 0 1.5rem;
-}
-.page-header {
-  margin-bottom: 2rem;
-}
-.page-header h1 {
-  font-size: 2.25rem;
-  font-weight: 700;
-  margin-bottom: 0.25rem;
-}
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 1.1rem;
-}
-.card {
-  background: var(--card-bg);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
-  padding: 2.5rem;
-  margin-top: 1.5rem;
-}
-.alert {
-  padding: 1rem 1.5rem;
-  border-radius: var(--radius);
-  margin-bottom: 1.5rem;
-  border-left: 5px solid;
-  font-weight: 500;
-}
-.alert strong {
-  font-weight: 700;
-}
-.alert-success {
-  background-color: var(--success-bg);
-  border-color: var(--success-color);
-  color: var(--success-color);
-}
-.alert-danger {
-  background-color: var(--danger-bg);
-  border-color: var(--danger-color);
-  color: var(--danger-color);
-}
-.btn {
-  padding: 0.75rem 1.5rem;
-  border-radius: var(--radius);
-  cursor: pointer;
-  text-decoration: none;
-  font-weight: 500;
-  display: inline-flex;
-  gap: 0.5rem;
-  align-items: center;
-  border: 1px solid transparent;
-  transition: var(--transition);
-  font-size: 1rem;
-}
-.btn-success {
-  background-color: var(--success-color);
-  color: #fff;
-  border-color: var(--success-color);
-}
-.btn-success:hover {
-  background-color: #059669;
-}
-.btn-secondary {
-  background-color: var(--secondary-color);
-  color: var(--text-primary);
-  border-color: var(--border-color);
-}
-.btn-secondary:hover {
-  background-color: var(--secondary-hover);
-}
-.btn-danger {
-    background-color: var(--danger-color);
-    color: #fff;
-    border-color: var(--danger-color);
-}
-.btn-danger:hover {
-    background-color: #dc2626;
-}
-.form-group {
-  margin-bottom: 1.25rem;
-}
-.form-label {
-  font-weight: 500;
-  margin-bottom: 0.5rem;
-  display: block;
-  font-size: 0.95rem;
-}
-.form-control, .form-select {
-  width: 100%;
-  padding: 0.75rem 1rem;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius);
-  background-color: var(--card-bg);
-  transition: var(--transition);
-  font-size: 1rem;
-  color: var(--text-primary);
-}
-.form-control:focus, .form-select:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
-}
-textarea.form-control {
-    min-height: 100px;
-    resize: vertical;
-}
-.form-note {
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  margin-top: 0.5rem;
-}
-.form-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 1.5rem;
-}
-.section-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--primary-color);
-  margin-top: 2.5rem;
-  margin-bottom: 1.5rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 2px solid var(--primary-color);
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-}
-.profile-section {
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 3rem;
-  align-items: flex-start;
-  margin-bottom: 2rem;
-}
-.profile-image-section {
-  text-align: center;
-}
-.profile-preview {
-  width: 160px;
-  height: 160px;
-  border-radius: 50%;
-  object-fit: cover;
-  border: 5px solid var(--card-bg);
-  box-shadow: var(--shadow-md);
-  margin-bottom: 1rem;
-  background-color: #eee;
-}
-.file-input-wrapper {
-  position: relative;
-  display: inline-block;
-}
-.file-input-label {
-    display: inline-block;
-    background-color: var(--primary-color);
-    color: #fff;
-    padding: 0.6rem 1.2rem;
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-}
-.file-input-label:hover {
-    background-color: var(--primary-hover);
-}
-.file-input-wrapper input[type=file] {
-    position: absolute;
-    left: -9999px;
-}
-#resetImageBtn {
-    margin-top: 0.75rem;
-    padding: 0.5rem 1rem;
-    font-size: 0.9rem;
-    background-color: transparent;
-    color: var(--danger-color);
-    border: 1px solid var(--danger-color);
-}
-#resetImageBtn:hover {
-    background-color: var(--danger-color);
-    color: #fff;
-}
-
-.form-actions {
-  display: flex;
-  gap: 1rem;
-  justify-content: flex-end;
-  margin-top: 2.5rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--border-color);
-}
-.action-buttons {
-    margin-bottom: 1rem;
-}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Sarabun', sans-serif; background-color: var(--body-bg); color: var(--text-primary); line-height: 1.6; }
+.navbar { background-color: var(--card-bg); color: var(--text-primary); padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; box-shadow: var(--shadow-sm); border-bottom: 1px solid var(--border-color); }
+.navbar-brand { font-weight: 700; font-size: 1.25rem; color: var(--primary-color); }
+.navbar-user { font-size: 0.9rem; color: var(--text-secondary); }
+.logout-btn { background: none; border: 1px solid var(--border-color); color: var(--primary-color); padding: 0.5rem 1rem; border-radius: var(--radius); text-decoration: none; transition: var(--transition); margin-left: 1rem; }
+.logout-btn:hover { background-color: var(--primary-color); color: white; }
+.container { max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; }
+.page-header { margin-bottom: 2rem; }
+.page-header h1 { font-size: 2.25rem; font-weight: 700; margin-bottom: 0.25rem; }
+.page-header p { color: var(--text-secondary); font-size: 1.1rem; }
+.card { background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow-md); padding: 2.5rem; margin-top: 1.5rem; }
+.alert { padding: 1rem 1.5rem; border-radius: var(--radius); margin-bottom: 1.5rem; border-left: 5px solid; font-weight: 500; }
+.alert strong { font-weight: 700; }
+.alert-success { background-color: var(--success-bg); border-color: var(--success-color); color: var(--success-color); }
+.alert-danger { background-color: var(--danger-bg); border-color: var(--danger-color); color: var(--danger-color); }
+.btn { padding: 0.75rem 1.5rem; border-radius: var(--radius); cursor: pointer; text-decoration: none; font-weight: 500; display: inline-flex; gap: 0.5rem; align-items: center; border: 1px solid transparent; transition: var(--transition); font-size: 1rem; }
+.btn-success { background-color: var(--success-color); color: #fff; border-color: var(--success-color); }
+.btn-success:hover { background-color: #059669; }
+.btn-secondary { background-color: var(--secondary-color); color: var(--text-primary); border-color: var(--border-color); }
+.btn-secondary:hover { background-color: var(--secondary-hover); }
+.btn-danger { background-color: var(--danger-color); color: #fff; border-color: var(--danger-color); }
+.btn-danger:hover { background-color: #dc2626; }
+.form-group { margin-bottom: 1.25rem; }
+.form-label { font-weight: 500; margin-bottom: 0.5rem; display: block; font-size: 0.95rem; }
+.form-control, .form-select { width: 100%; padding: 0.75rem 1rem; border: 1px solid var(--border-color); border-radius: var(--radius); background-color: var(--card-bg); transition: var(--transition); font-size: 1rem; color: var(--text-primary); }
+.form-control:focus, .form-select:focus { outline: none; border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2); }
+textarea.form-control { min-height: 100px; resize: vertical; }
+.form-note { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.5rem; }
+.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; }
+.section-title { font-size: 1.5rem; font-weight: 700; color: var(--primary-color); margin-top: 2.5rem; margin-bottom: 1.5rem; padding-bottom: 0.75rem; border-bottom: 2px solid var(--primary-color); display: flex; gap: 0.75rem; align-items: center; }
+.profile-section { display: grid; grid-template-columns: 200px 1fr; gap: 3rem; align-items: flex-start; margin-bottom: 2rem; }
+.profile-image-section { text-align: center; }
+.profile-preview { width: 160px; height: 160px; border-radius: 50%; object-fit: cover; border: 5px solid var(--card-bg); box-shadow: var(--shadow-md); margin-bottom: 1rem; background-color: #eee; }
+.file-input-wrapper { position: relative; display: inline-block; }
+.file-input-label { display: inline-block; background-color: var(--primary-color); color: #fff; padding: 0.6rem 1.2rem; border-radius: var(--radius); cursor: pointer; transition: var(--transition); }
+.file-input-label:hover { background-color: var(--primary-hover); }
+.file-input-wrapper input[type=file] { position: absolute; left: -9999px; }
+#resetImageBtn { margin-top: 0.75rem; padding: 0.5rem 1rem; font-size: 0.9rem; background-color: transparent; color: var(--danger-color); border: 1px solid var(--danger-color); }
+#resetImageBtn:hover { background-color: var(--danger-color); color: #fff; }
+.form-actions { display: flex; gap: 1rem; justify-content: flex-end; margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-color); }
+.action-buttons { margin-bottom: 1rem; }
 @media(max-width: 992px) {
-    .profile-section {
-        grid-template-columns: 1fr;
-        text-align: center;
-    }
-    .profile-image-section {
-        margin-bottom: 2rem;
-    }
+  .profile-section { grid-template-columns: 1fr; text-align: center; }
+  .profile-image-section { margin-bottom: 2rem; }
 }
 @media(max-width: 768px){
   .form-row{grid-template-columns:1fr}
@@ -479,13 +273,8 @@ textarea.form-control {
   .container { padding: 0 1rem; }
   .card { padding: 1.5rem; }
   .page-header h1 { font-size: 1.8rem; }
-  .form-actions {
-    flex-direction: column;
-  }
-  .btn {
-    width: 100%;
-    justify-content: center;
-  }
+  .form-actions { flex-direction: column; }
+  .btn { width: 100%; justify-content: center; }
 }
 </style>
 </head>
@@ -505,12 +294,11 @@ textarea.form-control {
     </div>
 
     <div class="action-buttons">
-        <a href="student_dashboard.php" class="btn btn-secondary">
-            <span>🏠</span>
-            กลับหน้าหลัก
-        </a>
+      <a href="student_dashboard.php" class="btn btn-secondary">
+        <span>🏠</span> กลับหน้าหลัก
+      </a>
     </div>
-    
+
     <?php if($message): ?><div class="alert alert-success"><strong>สำเร็จ!</strong> <?php echo h($message); ?></div><?php endif; ?>
     <?php if($error): ?><div class="alert alert-danger"><strong>ผิดพลาด!</strong> <?php echo $error; ?></div><?php endif; ?>
 
@@ -522,9 +310,7 @@ textarea.form-control {
             <img src="<?php echo h($profile_picture_src); ?>" alt="รูปโปรไฟล์" class="profile-preview" id="profilePreview">
             <div class="file-input-wrapper">
               <input type="file" name="profile_picture" id="profilePicture" accept="image/*" onchange="previewImage(this)">
-              <label for="profilePicture" class="file-input-label">
-                <span>🖼️</span> เลือกรูปโปรไฟล์
-              </label>
+              <label for="profilePicture" class="file-input-label"><span>🖼️</span> เลือกรูปโปรไฟล์</label>
             </div>
             <div class="form-note">JPG/PNG/GIF/WEBP (ไม่เกิน 5MB)</div>
             <button type="button" class="btn btn-danger" id="resetImageBtn" style="display:none;">🗑️ ใช้รูปเดิม</button>
@@ -547,8 +333,8 @@ textarea.form-control {
                 <select class="form-select" id="gender" name="gender">
                   <?php $g=$student['gender']??''; ?>
                   <option value="">ไม่ระบุ</option>
-                  <option value="ชาย"   <?php echo ($g==='ชาย')?'selected':''; ?>>ชาย</option>
-                  <option value="หญิง"  <?php echo ($g==='หญิง')?'selected':''; ?>>หญิง</option>
+                  <option value="ชาย"  <?php echo ($g==='ชาย')?'selected':''; ?>>ชาย</option>
+                  <option value="หญิง" <?php echo ($g==='หญิง')?'selected':''; ?>>หญิง</option>
                 </select>
               </div>
             </div>
@@ -580,114 +366,86 @@ textarea.form-control {
         <h3 class="section-title">📚 ข้อมูลการศึกษา</h3>
 
         <!-- คณะ / สาขา -->
-<div class="form-row">
-  <div class="form-group">
-    <label class="form-label" for="faculty">คณะ</label>
-    <select class="form-select" id="faculty" name="faculty"
-            data-current="<?php echo h($student['faculty'] ?? ''); ?>">
-      <option value="">— เลือกคณะ —</option>
-    </select>
-  </div>
-  <div class="form-group">
-    <label class="form-label" for="major">สาขา</label>
-    <select class="form-select" id="major" name="major"
-            data-current="<?php echo h($student['major'] ?? ''); ?>">
-      <option value="">— เลือกสาขา —</option>
-    </select>
-    <div class="form-note">สาขาจะขึ้นตามคณะที่เลือก</div>
-  </div>
-</div>
-<div class="form-group">
-    <label class="form-label" for="program">สาขาวิชา</label>
-    <select class="form-select" id="program" name="program"
-            data-current="<?php echo h($student['program'] ?? ''); ?>">
-      <option value="">— เลือกสาขาวิชา —</option>
-    </select>
-    <div class="form-note">สาขาวิชาจะขึ้นตามคณะที่เลือก</div>
-  </div>
-<!-- ระดับ / ชื่อหลักสูตร -->
-<div class="form-row">
-  <div class="form-group">
-    <label class="form-label" for="education_level">ระดับการศึกษา</label>
-    <select class="form-select" id="education_level" name="education_level"
-            data-current="<?php echo h($student['education_level'] ?? ''); ?>">
-      <option value="">— เลือกระดับ —</option>
-    </select>
-  </div>
-  <div class="form-group">
-    <label class="form-label" for="curriculum_name">ชื่อหลักสูตร</label>
-    <select class="form-select" id="curriculum_name" name="curriculum_name"
-            data-current="<?php echo h($student['curriculum_name'] ?? ''); ?>">
-      <option value="">— เลือกหลักสูตร —</option>
-    </select>
-  </div>
-</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="faculty">คณะ</label>
+            <select class="form-select" id="faculty" name="faculty" data-current="<?php echo h($student['faculty'] ?? ''); ?>">
+              <option value="">— เลือกคณะ —</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="major">สาขา</label>
+            <select class="form-select" id="major" name="major" data-current="<?php echo h($student['major'] ?? ''); ?>">
+              <option value="">— เลือกสาขา —</option>
+            </select>
+            <div class="form-note">สาขาจะขึ้นตามคณะที่เลือก</div>
+          </div>
+        </div>
 
-<!-- ประเภทหลักสูตร / ปีหลักสูตร -->
-<div class="form-row">
-  <div class="form-group">
-    <label class="form-label" for="program_type">ประเภทหลักสูตร</label>
-    <select class="form-select" id="program_type" name="program_type"
-            data-current="<?php echo h($student['program_type'] ?? ''); ?>">
-      <option value="">— เลือกประเภท —</option>
-    </select>
-  </div>
-  <div class="form-group">
-    <label class="form-label" for="$education_year">ปีหลักสูตร (พ.ศ.)</label>
-    <select class="form-select" id="education_year" name="education_year"
-            data-current="<?php echo h($student['education_year'] ?? ''); ?>">
-      <option value="">— เลือกปีหลักสูตร —</option>
-    </select>
-  </div>
-</div>
+        <!-- สาขาวิชา -->
+        <div class="form-group">
+          <label class="form-label" for="program">สาขาวิชา</label>
+          <select class="form-select" id="program" name="program" data-current="<?php echo h($student['program'] ?? ''); ?>">
+            <option value="">— เลือกสาขาวิชา —</option>
+          </select>
+          <div class="form-note">สาขาวิชาจะขึ้นตามคณะ (ถ้าไม่มี API จะดึงค่าปัจจุบันมาแสดงให้อัตโนมัติ)</div>
+        </div>
 
-<!-- กลุ่มเรียน / GPA -->
-<div class="form-row">
-  <div class="form-group">
-    <label class="form-label" for="student_group">กลุ่มเรียน</label>
-    <select class="form-select" id="student_group" name="student_group"
-            data-current="<?php echo h($student['student_group'] ?? ''); ?>">
-      <option value="">— เลือกกลุ่มเรียน —</option>
-    </select>
-    <div class="form-note">กลุ่มเรียนจะขึ้นตามหลักสูตร</div>
-  </div>
-  <div class="form-group">
-    <label class="form-label" for="gpa">เกรดเฉลี่ยสะสม (GPA)</label>
-    <input type="number" step="0.01" min="0" max="4"
-           class="form-control" id="gpa" name="gpa"
-           value="<?php echo h($student['gpa'] ?? ''); ?>" placeholder="เช่น 3.50">
-    <div class="form-note">0.00–4.00 (เว้นว่างได้หากยังไม่มีข้อมูล)</div>
-  </div>
-</div>
+        <!-- ระดับ / ชื่อหลักสูตร -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="education_level">ระดับการศึกษา</label>
+            <select class="form-select" id="education_level" name="education_level" data-current="<?php echo h($student['education_level'] ?? ''); ?>">
+              <option value="">— เลือกระดับ —</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="curriculum_name">ชื่อหลักสูตร</label>
+            <select class="form-select" id="curriculum_name" name="curriculum_name" data-current="<?php echo h($student['curriculum_name'] ?? ''); ?>">
+              <option value="">— เลือกหลักสูตร —</option>
+            </select>
+          </div>
+        </div>
 
-    <!-- สถานะ / ภาคเรียน -->
-    <div class="form-group">
-        <label class="form-label" for="student_status">สถานะนักศึกษา</label>
-        <select class="form-select" id="student_status" name="student_status"
-                data-current="<?php echo h($term_ui); ?>">
-        <option value="">— เลือก —</option>
-        </select>
-    </div>
-    <div class="form-group">
-        <label class="form-label" for="education_term">ภาคการศึกษาปัจจุบัน</label>
-        <select class="form-select" id="education_term" name="education_term"
-                data-current="<?php echo h($term_ui); ?>">
-        <option value="">— เลือกภาคเรียน —</option>
-        </select>
-    </div>
-    </div>
+        <!-- ประเภทหลักสูตร / ปีหลักสูตร -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="program_type">ประเภทหลักสูตร</label>
+            <select class="form-select" id="program_type" name="program_type" data-current="<?php echo h($student['program_type'] ?? ''); ?>">
+              <option value="">— เลือกประเภท —</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="education_year">ปีหลักสูตร (พ.ศ.)</label>
+            <select class="form-select" id="education_year" name="education_year" data-current="<?php echo h($student['education_year'] ?? ''); ?>">
+              <option value="">— เลือกปีหลักสูตร —</option>
+            </select>
+          </div>
+        </div>
 
-    <!-- ปีการศึกษา -->
-    <div class="form-row">
-    <div class="form-group">
-        <label class="form-label" for="education_year">ปีการศึกษาปัจจุบัน (พ.ศ.)</label>
-        <select class="form-select" id="education_year" name="education_year"
-                data-current="<?php echo h($student['education_year'] ?? ''); ?>">
-        <option value="">— เลือกปีการศึกษา —</option>
-        </select>
-    </div>
-    <div class="form-group"></div>
-    </div>
+        <!-- กลุ่มเรียน / GPA -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="student_group">กลุ่มเรียน</label>
+            <select class="form-select" id="student_group" name="student_group" data-current="<?php echo h($student['student_group'] ?? ''); ?>">
+              <option value="">— เลือกกลุ่มเรียน —</option>
+            </select>
+            <div class="form-note">กลุ่มเรียนจะขึ้นตามหลักสูตร</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="gpa">เกรดเฉลี่ยสะสม (GPA)</label>
+            <input type="number" step="0.01" min="0" max="4" class="form-control" id="gpa" name="gpa" value="<?php echo h($student['gpa'] ?? ''); ?>" placeholder="เช่น 3.50">
+            <div class="form-note">0.00–4.00 (เว้นว่างได้หากยังไม่มีข้อมูล)</div>
+          </div>
+        </div>
+
+        <!-- ภาคการศึกษาปัจจุบัน -->
+        <div class="form-group">
+          <label class="form-label" for="education_term">ภาคการศึกษาปัจจุบัน</label>
+          <select class="form-select" id="education_term" name="education_term" data-current="<?php echo h($term_ui); ?>">
+            <option value="">— เลือกภาคเรียน —</option>
+          </select>
+        </div>
 
         <div class="form-actions">
           <a href="student_dashboard.php" class="btn btn-secondary">❌ ยกเลิก</a>
@@ -706,29 +464,21 @@ const resetImageBtn = document.getElementById('resetImageBtn');
 function previewImage(input) {
   if (input.files && input.files[0]) {
     const reader = new FileReader();
-    reader.onload = e => {
-      profilePreview.src = e.target.result;
-    };
+    reader.onload = e => { profilePreview.src = e.target.result; };
     reader.readAsDataURL(input.files[0]);
     resetImageBtn.style.display = 'inline-flex';
   }
 }
-
 function resetImage() {
   profilePictureInput.value = '';
   profilePreview.src = originalAvatarSrc;
   resetImageBtn.style.display = 'none';
 }
-
 document.addEventListener('DOMContentLoaded', () => {
-    // Show reset button only if there's a custom image uploaded initially
-    if (profilePreview.src && !profilePreview.src.includes('ui-avatars.com')) {
-        // This logic might need adjustment if your default image isn't from ui-avatars
-    }
-    resetImageBtn.addEventListener('click', resetImage);
+  resetImageBtn.addEventListener('click', resetImage);
 });
 
-// Basic client-side validation for required fields
+// validate ชื่อ
 document.querySelector('form').addEventListener('submit', function(e) {
   const fullName = document.getElementById('full_name').value.trim();
   if (!fullName) {
@@ -737,52 +487,75 @@ document.querySelector('form').addEventListener('submit', function(e) {
     document.getElementById('full_name').focus();
   }
 });
-
-// Input sanitization helpers
+// sanitize
 document.getElementById('phone').addEventListener('input', function() {
-    this.value = this.value.replace(/[^0-9+\-\s().]/g, '');
+  this.value = this.value.replace(/[^0-9+\-\s().]/g, '');
 });
 document.getElementById('citizen_id').addEventListener('input', function() {
-    this.value = this.value.replace(/[^0-9]/g, '');
+  this.value = this.value.replace(/[^0-9]/g, '');
 });
-
 </script>
+
 <script>
 const OPTIONS_API = <?php echo json_encode($OPTIONS_API); ?>;
 
-// เติม option ให้ select
+// เติม option ให้ select (รองรับทั้ง [{value,label}] และ ['ชื่อ','ชื่อ'])
 function fillSelect(sel, items, current = '') {
+  if (!sel) return;
   sel.innerHTML = '<option value="">— เลือก —</option>';
   (items || []).forEach(it => {
+    const value = (typeof it === 'object' && it !== null) ? (it.value ?? it.label ?? '') : String(it);
+    const label = (typeof it === 'object' && it !== null) ? (it.label ?? it.value ?? '') : String(it);
+    if (!label) return;
     const opt = document.createElement('option');
-    opt.value = it.value;
-    opt.textContent = it.label;
-    if (current && String(current) === String(it.value)) opt.selected = true;
+    opt.value = value;
+    opt.textContent = label;
+    if (current && String(current) === String(value)) opt.selected = true;
     sel.appendChild(opt);
   });
 }
 
-// โหลด meta ทั้งก้อน: faculties, levels, ptypes, curnames, curyears, groups, statuses, terms
+// meta หลัก
 async function loadMeta() {
   const res = await fetch(`${OPTIONS_API}?ajax=meta`, {cache:'no-store'});
-  if (!res.ok) throw new Error('โหลดตัวเลือกไม่สำเร็จ');
+  if (!res.ok) throw new Error('โหลด meta ไม่สำเร็จ');
   return await res.json();
 }
 
-// เมื่อเลือกคณะ → โหลดสาขาเฉพาะคณะนั้น
+// majors ตามคณะ
 async function loadMajorsByFaculty(facultyValue) {
-  const url = `${OPTIONS_API}?ajax=majors_by_faculty&faculty=${encodeURIComponent(facultyValue || '')}`;
-  const res = await fetch(url, {cache:'no-store'});
-  if (!res.ok) return {majors: []};
-  return await res.json();
+  try {
+    const url = `${OPTIONS_API}?ajax=majors_by_faculty&faculty=${encodeURIComponent(facultyValue || '')}`;
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) return { majors: [] };
+    return await res.json(); // { majors: [...] }
+  } catch (e) {
+    return { majors: [] };
+  }
 }
 
-// filter ตาม parent_value (ใช้กรณีหลักสูตร/กลุ่มเรียนถ้าคุณจัดโครงสร้าง parent ใน form_options)
-function filterByParent(list, parent) {
-  // meta.curnames / meta.groups จาก ?ajax=meta ไม่มี parent_value มาด้วย
-  // ถ้าคุณอยากคัดตาม parent จริง ๆ แนะนำเพิ่ม endpoint เหมือน majors_by_faculty
-  // ที่นี่จะไม่ filter ถ้า API หลักไม่ได้ส่ง parent_value มา
-  return list;
+// (ใหม่) programs ตามคณะ
+async function loadProgramsByFaculty(facultyValue) {
+  try {
+    const url = `${OPTIONS_API}?ajax=programs_by_faculty&faculty=${encodeURIComponent(facultyValue || '')}`;
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) return { programs: [] };
+    return await res.json(); // { programs: [...] }
+  } catch (e) {
+    return { programs: [] };
+  }
+}
+
+// (ใหม่) ดึงรายการ programs ทั้งหมด (เผื่อไม่มี endpoint แบบตามคณะ)
+async function loadProgramsAll() {
+  try {
+    const url = `${OPTIONS_API}?ajax=programs`;
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) return { programs: [] };
+    return await res.json(); // { programs: [...] }
+  } catch (e) {
+    return { programs: [] };
+  }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -795,7 +568,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const $curyear   = document.getElementById('education_year');
   const $group     = document.getElementById('student_group');
   const $term      = document.getElementById('education_term');
-  const $eduyear   = document.getElementById('education_year');
 
   const current = {
     faculty:   $faculty?.dataset.current || '',
@@ -806,14 +578,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     ptype:     $ptype?.dataset.current || '',
     curyear:   $curyear?.dataset.current || '',
     group:     $group?.dataset.current || '',
-    term:      $term?.dataset.current || '',
-    eduyear:   $eduyear?.dataset.current || ''
+    term:      $term?.dataset.current || ''
   };
 
   try {
     const meta = await loadMeta();
 
-    // 1) คณะ / ระดับ / ประเภท / หลักสูตร / ปีหลักสูตร / กลุ่ม / ภาคเรียน / ปีการศึกษา
+    // เติมคณะ/ระดับ/ประเภท/หลักสูตร/ปีหลักสูตร/กลุ่ม/ภาคเรียน
     fillSelect($faculty,  meta.faculties || [], current.faculty);
     fillSelect($level,    meta.levels    || [], current.level);
     fillSelect($ptype,    meta.ptypes    || [], current.ptype);
@@ -821,30 +592,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     fillSelect($curyear,  meta.curyears  || [], current.curyear);
     fillSelect($group,    meta.groups    || [], current.group);
     fillSelect($term,     meta.terms     || [], current.term);
-    fillSelect($eduyear,  (meta.education_years || meta.curyears || []), current.eduyear); // ถ้าไม่มี education_years ใช้ curyears แทนชั่วคราว
 
-    // 2) โหลดสาขาตามคณะ (ครั้งแรก)
+    // ---------- สาขาวิชา (program) : ปิดประตูพัง 3 ชั้น ----------
+    // ชั้น A: ตามคณะ
+    let progList = [];
     if (current.faculty) {
-      const {majors} = await loadMajorsByFaculty(current.faculty);
-      fillSelect($major, majors || [], current.major);
+      const pf = await loadProgramsByFaculty(current.faculty);
+      if (Array.isArray(pf.programs) && pf.programs.length > 0) progList = pf.programs;
     }
+    // ชั้น B: ถ้า A ว่าง ลองดึงทั้งหมด
+    if (progList.length === 0) {
+      if (Array.isArray(meta.programs) && meta.programs.length > 0) {
+        progList = meta.programs;
+      } else {
+        const all = await loadProgramsAll();
+        if (Array.isArray(all.programs) && all.programs.length > 0) progList = all.programs;
+      }
+    }
+    // ชั้น C: ถ้ายังว่างจริงๆ → เอาค่าปัจจุบันไว้ก่อน
+    if (progList.length === 0 && current.program) {
+      progList = [{value: current.program, label: current.program}];
+    }
+    fillSelect($program, progList, current.program);
 
-    // 3) เมื่อเปลี่ยนคณะ → โหลดสาขาใหม่
-    $faculty?.addEventListener('change', async function () {
-      const fac = this.value;
-      const {majors} = await loadMajorsByFaculty(fac);
-      fillSelect($major, majors || [], '');
-    });
+    // ---------- majors ขึ้นกับคณะ ----------
+    const bindMajorsAndPrograms = async () => {
+      const fac = $faculty.value || '';
 
-    // (ออปชัน) ถ้าคุณต้องการให้หลักสูตร/กลุ่มเรียน “ตามสาขา/หลักสูตร” จริง ๆ
-    // แนะนำเพิ่ม endpoint เช่น:
-    //   ?ajax=curriculum_by_major&major=CS
-    //   ?ajax=groups_by_curriculum&curriculum=CS61
-    // แล้วผูก events เหมือนข้างบน
-    // ที่โค้ดนี้ จะดึงทั้งก้อนจาก meta มาก่อน (ไม่ได้ filter ตาม parent)
-  } catch (e) {
-    console.error(e);
-    alert('ไม่สามารถโหลดตัวเลือกจากระบบได้');
+      // majors
+      const data = await loadMajorsByFaculty(fac);
+      fillSelect($major, (data.majors || []), current.major);
+
+      // programs
+      let plist = [];
+      const pf2 = await loadProgramsByFaculty(fac);
+      if (Array.isArray(pf2.programs) && pf2.programs.length > 0) {
+        plist = pf2.programs;
+      } else {
+        // fallback ทั้งหมด
+        const all2 = await loadProgramsAll();
+        if (Array.isArray(all2.programs) && all2.programs.length > 0) plist = all2.programs;
+      }
+      if (plist.length === 0 && current.program) {
+        plist = [{value: current.program, label: current.program}];
+      }
+      fillSelect($program, plist, current.program);
+    };
+
+    if ($faculty) {
+      $faculty.addEventListener('change', bindMajorsAndPrograms);
+      await bindMajorsAndPrograms();
+    }
+  } catch (err) {
+    console.error(err);
+    alert('โหลดตัวเลือกสำหรับแบบฟอร์มไม่สำเร็จ');
   }
 });
 </script>

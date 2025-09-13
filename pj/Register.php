@@ -1,17 +1,107 @@
 <?php
-// register.php — ฟอร์มลงทะเบียนนักศึกษา (มินิมอล + กรองตัวเลข + ยืนยันรหัสผ่าน)
-// เวอร์ชันนี้เอา "สถานะ" ออกจากฟอร์มและ JS ทั้งหมด แต่ยังตั้งค่าเริ่มต้นเป็น "กำลังศึกษา" ตอน INSERT
-require __DIR__ . '/db_connect.php';
+// register.php — ฟอร์มลงทะเบียนนักศึกษา (เวอร์ชัน self-contained)
+// - ดึงรายการตัวเลือกผ่าน JSON endpoint ภายในไฟล์นี้เอง (ไม่พึ่ง course_management.php)
+// - เก็บค่าจาก dropdown เป็น "ตัวหนังสือ (label)" ทั้งหมด
 
-/* สำหรับ JS ให้รู้ว่า endpoint ไหนคือ OPTIONS API */
-$OPTIONS_API = 'course_management.php';
+require __DIR__ . '/db_connect.php'; // ต้องมี $conn = new mysqli(...)
 
+// ============ JSON ENDPOINT (ไม่ต้องล็อกอิน) ============
+if (isset($_GET['json'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    // helper สั้นๆ
+    function labels_by_type(mysqli $conn, string $type): array {
+        $sql = "SELECT label FROM form_options WHERE type=? ORDER BY label";
+        $st  = $conn->prepare($sql);
+        $st->bind_param("s", $type);
+        $st->execute();
+        $rs  = $st->get_result();
+        $out = [];
+        while ($row = $rs->fetch_assoc()) $out[] = $row['label'];
+        return $out;
+    }
+
+    $mode = $_GET['json'];
+
+    if ($mode === 'meta') {
+        echo json_encode([
+            'faculties' => labels_by_type($conn, 'faculty'),
+            'levels'    => labels_by_type($conn, 'education_level'),
+            'ptypes'    => labels_by_type($conn, 'program_type'),
+            'curnames'  => labels_by_type($conn, 'curriculum_name'),
+            'curyears'  => labels_by_type($conn, 'curriculum_year'),
+            'terms'     => labels_by_type($conn, 'education_term'),
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    if ($mode === 'majors' && isset($_GET['faculty'])) {
+        $faculty = trim($_GET['faculty']);
+        // child = major (parent_value = id ของ faculty ที่ label = ?)
+        $sql = "
+            SELECT m.label
+            FROM form_options m
+            JOIN form_options f ON m.parent_value = f.id
+            WHERE m.type='major' AND f.type='faculty' AND f.label=?
+            ORDER BY m.label
+        ";
+        $st = $conn->prepare($sql);
+        $st->bind_param("s", $faculty);
+        $st->execute();
+        $rs = $st->get_result();
+        $out=[];
+        while ($r = $rs->fetch_assoc()) $out[] = $r['label'];
+        echo json_encode($out, JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    if ($mode === 'programs' && isset($_GET['major'])) {
+        $major = trim($_GET['major']);
+        $sql = "
+            SELECT p.label
+            FROM form_options p
+            JOIN form_options m ON p.parent_value = m.id
+            WHERE p.type='program' AND m.type='major' AND m.label=?
+            ORDER BY p.label
+        ";
+        $st = $conn->prepare($sql);
+        $st->bind_param("s", $major);
+        $st->execute();
+        $rs = $st->get_result();
+        $out=[];
+        while ($r = $rs->fetch_assoc()) $out[] = $r['label'];
+        echo json_encode($out, JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    if ($mode === 'groups' && isset($_GET['program'])) {
+        $program = trim($_GET['program']);
+        $sql = "
+            SELECT g.label
+            FROM form_options g
+            JOIN form_options p ON g.parent_value = p.id
+            WHERE g.type='student_group' AND p.type='program' AND p.label=?
+            ORDER BY g.label
+        ";
+        $st = $conn->prepare($sql);
+        $st->bind_param("s", $program);
+        $st->execute();
+        $rs = $st->get_result();
+        $out=[];
+        while ($r = $rs->fetch_assoc()) $out[] = $r['label'];
+        echo json_encode($out, JSON_UNESCAPED_UNICODE); exit;
+    }
+
+    http_response_code(400);
+    echo json_encode(['error' => 'bad request'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ============ โค้ดเดิม: รับ POST และบันทึก ============
 $error_message = '';
 $success_message = '';
 
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
     try {
-        // รับข้อมูลจากฟอร์ม
+        // --- รับข้อมูล ---
         $full_name       = trim($_POST['full_name'] ?? '');
         $birthdate       = !empty($_POST['birthdate']) ? trim($_POST['birthdate']) : null;
         $gender          = trim($_POST['gender'] ?? '');
@@ -19,8 +109,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $address         = trim($_POST['address'] ?? '');
         $phone           = trim($_POST['phone'] ?? '');
         $email           = trim($_POST['email'] ?? '');
-        
-        // ข้อมูลการศึกษา
+
+        // การศึกษา (ทั้งหมดเป็น label)
         $faculty         = trim($_POST['faculty'] ?? '');
         $major           = trim($_POST['major'] ?? '');
         $program         = trim($_POST['program'] ?? '');
@@ -38,10 +128,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $password_confirm= $_POST['password_confirm'] ?? '';
 
         if ($full_name === '' || $student_id === '' || $password === '') {
-            throw new Exception("กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน: ชื่อ-นามสกุล, รหัสนักศึกษา, และรหัสผ่าน");
+            throw new Exception("กรุณากรอก: ชื่อ-นามสกุล, รหัสนักศึกษา, รหัสผ่าน");
         }
-
-        if ($student_id !== '' && !ctype_digit($student_id)) { throw new Exception("รหัสนักศึกษาต้องเป็นตัวเลขเท่านั้น"); }
+        if ($student_id !== '' && !ctype_digit($student_id)) throw new Exception("รหัสนักศึกษาต้องเป็นตัวเลขเท่านั้น");
         if ($phone !== '') {
             if (!ctype_digit($phone)) throw new Exception("เบอร์โทรต้องเป็นตัวเลขเท่านั้น");
             if (strlen($phone) < 9 || strlen($phone) > 10) throw new Exception("เบอร์โทรควรมีความยาว 9-10 หลัก");
@@ -50,25 +139,28 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             if (!ctype_digit($citizen_id)) throw new Exception("เลขบัตรประชาชนต้องเป็นตัวเลขเท่านั้น");
             if (strlen($citizen_id) !== 13) throw new Exception("เลขบัตรประชาชนต้องมี 13 หลัก");
         }
-        if ($gpa !== null && ($gpa < 0 || $gpa > 4)) { throw new Exception("กรุณากรอก GPA เป็นตัวเลขระหว่าง 0 - 4"); }
-        if ($password_confirm === '' || $password_confirm !== $password) { throw new Exception("รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน"); }
+        if ($gpa !== null && ($gpa < 0 || $gpa > 4)) throw new Exception("กรุณากรอก GPA ระหว่าง 0 - 4");
+        if ($password_confirm === '' || $password_confirm !== $password) throw new Exception("รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน");
 
+        // ตรวจซ้ำรหัสนักศึกษา
         $check_sql = "SELECT student_id FROM education_info WHERE student_id = ?";
         $check_stmt = $conn->prepare($check_sql);
         $check_stmt->bind_param("s", $student_id);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
-        if ($check_result->num_rows > 0) { throw new Exception("รหัสนักศึกษา '$student_id' นี้มีอยู่ในระบบแล้ว"); }
+        if ($check_result->num_rows > 0) throw new Exception("รหัสนักศึกษา '$student_id' นี้มีอยู่ในระบบแล้ว");
 
         $conn->begin_transaction();
 
+        // personal_info
         $sql_personal = "INSERT INTO personal_info (full_name, birthdate, gender, citizen_id, address, phone, email)
                          VALUES (?, ?, ?, ?, ?, ?, ?)";
         $stmt_personal = $conn->prepare($sql_personal);
         $stmt_personal->bind_param("sssssss", $full_name, $birthdate, $gender, $citizen_id, $address, $phone, $email);
-        if (!$stmt_personal->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลส่วนตัวได้: " . $stmt_personal->error); }
+        if (!$stmt_personal->execute()) throw new Exception("ไม่สามารถบันทึกข้อมูลส่วนตัวได้: " . $stmt_personal->error);
         $personal_id = $conn->insert_id;
 
+        // education_info (เก็บ label ทั้งหมด)
         $sql_education = "INSERT INTO education_info (
             personal_id, student_id, faculty, major, program, education_level,
             curriculum_name, program_type, curriculum_year, student_group,
@@ -81,41 +173,46 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             $curriculum_name, $program_type, $curriculum_year, $student_group,
             $gpa, $student_status, $education_term, $education_year
         );
-        if (!$stmt_education->execute()) { throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error); }
+        if (!$stmt_education->execute()) throw new Exception("ไม่สามารถบันทึกข้อมูลการศึกษาได้: " . $stmt_education->error);
 
+        // user_login
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
         $sql_login = "INSERT INTO user_login (username, student_id, password) VALUES (?, ?, ?)";
         $stmt_login = $conn->prepare($sql_login);
         $stmt_login->bind_param("sss", $student_id, $student_id, $hashed_password);
-        if (!$stmt_login->execute()) {
-            throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error);
-        }
+        if (!$stmt_login->execute()) throw new Exception("ไม่สามารถบันทึกข้อมูลการเข้าสู่ระบบได้: " . $stmt_login->error);
 
-        $conn->commit();
-        $success_message = "ลงทะเบียนสำเร็จ! ยินดีต้อนรับคุณ " . htmlspecialchars($full_name);
-        header("refresh:3;url=login.php");
+      $conn->commit();
+
+      if (session_status() === PHP_SESSION_NONE) { session_start(); }
+      $_SESSION['loggedin']    = true;
+      $_SESSION['user_type']   = 'student';
+      $_SESSION['student_id']  = $student_id;
+      $_SESSION['personal_id'] = $personal_id;
+      $_SESSION['username']    = $student_id;
+      $_SESSION['full_name']   = $full_name;
+header('Location: student_dashboard.php');
+exit;
+
     } catch (Exception $e) {
         $conn->rollback();
         $error_message = $e->getMessage();
     }
 }
 ?>
+
 <!DOCTYPE html>
-  <html lang="th">
-  <head>
-  <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>ลงทะเบียนนักศึกษา</title>
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;700&display=swap" rel="stylesheet">
-          <link rel="stylesheet" href="https://cdn-uicons.flaticon.com/uicons-regular-rounded/css/uicons-regular-rounded.css">
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ลงทะเบียนนักศึกษา</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn-uicons.flaticon.com/uicons-regular-rounded/css/uicons-regular-rounded.css">
 <style>
-:root {
-  --primary-color:#007bff; --primary-hover:#0056b3; --secondary-color:#6c757d;
-  --success-color:#28a745; --danger-color:#dc3545; --text-primary:#212529; --text-secondary:#6c757d;
-  --border-color:#dee2e6; --body-bg:#f4f7f9; --card-bg:#ffffff; --radius:8px; --shadow:0 4px 15px rgba(0,0,0,.08); --transition:all .2s ease-in-out;
-}
+:root { --primary-color:#007bff; --primary-hover:#0056b3; --secondary-color:#6c757d; --success-color:#28a745; --danger-color:#dc3545; --text-primary:#212529; --text-secondary:#6c757d; --border-color:#dee2e6; --body-bg:#f4f7f9; --card-bg:#ffffff; --radius:8px; --shadow:0 4px 15px rgba(0,0,0,.08); --transition:all .2s ease-in-out; }
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text-primary);display:flex;justify-content:center;align-items:center;min-height:100vh;padding:2rem 1rem}
 .container{max-width:900px;width:100%;background:var(--card-bg);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
@@ -143,13 +240,7 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
 .password-toggle { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; font-size: 18px; color: #666; }
 .password-toggle:hover { color: #000; }
 .hint{font-size:.9rem;color:var(--text-secondary);margin-top:.25rem}
-
-@media (max-width:768px){
-  body{padding:1rem .5rem}
-  .form-container,.header{padding:1.5rem}
-  .form-actions{flex-direction:column-reverse}
-  .btn{width:100%}
-}
+@media (max-width:768px){ body{padding:1rem .5rem} .form-container,.header{padding:1.5rem} .form-actions{flex-direction:column-reverse} .btn{width:100%} }
 </style>
 </head>
 <body>
@@ -182,7 +273,7 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
         <div class="form-group">
           <label for="gender">เพศ</label>
           <select id="gender" name="gender" class="form-control">
-            <option value="">-- เลือกเพศ --</option>
+            <option value=""> เลือกเพศ </option>
             <option value="ชาย">ชาย</option>
             <option value="หญิง">หญิง</option>
           </select>
@@ -265,13 +356,13 @@ body{font-family:'Sarabun',sans-serif;background:var(--body-bg);color:var(--text
 
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
-  const submitBtn = document.getElementById('submitBtn');
-  const facEl = document.getElementById('faculty');
-  const majorEl = document.getElementById('major');
-  const programEl = document.getElementById('program');
-  const groupEl = document.getElementById('student_group');
-  const endpoint = '<?php echo $OPTIONS_API; ?>';
+  const submitBtn  = document.getElementById('submitBtn');
+  const facEl      = document.getElementById('faculty');
+  const majorEl    = document.getElementById('major');
+  const programEl  = document.getElementById('program');
+  const groupEl    = document.getElementById('student_group');
 
+  // ===== Numeric guards =====
   const onlyDigits = (el, maxLen = null) => {
     el.addEventListener('input', () => {
       const digits = el.value.replace(/\D+/g, '');
@@ -282,6 +373,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   onlyDigits(document.getElementById('phone'), 10);
   onlyDigits(document.getElementById('student_id'));
 
+  // ===== Password match hint =====
   const pw = document.getElementById('password');
   const pw2 = document.getElementById('password_confirm');
   const pwHint = document.getElementById('pwMatchHint');
@@ -294,96 +386,83 @@ document.addEventListener('DOMContentLoaded', async () => {
   pw.addEventListener('input', checkPwMatch);
   pw2.addEventListener('input', checkPwMatch);
 
-  const fill = (element, list, withBlank = true, blankText = '-- เลือก --') => {
-    if (!element) return;
-    element.innerHTML = '';
-    if (withBlank) element.append(new Option(blankText, ''));
-    (list || []).forEach(o => {
-      const val = (o && (o.id ?? o.value)) ?? (typeof o === 'string' ? o : '');
-      const text = (o && (o.label ?? o.text ?? o.name)) ?? String(val);
-      element.append(new Option(text, val));
-    });
-  };
-
-  const loadGroups = async (programValue) => {
-    const el = document.getElementById('student_group');
+  // ===== UI helpers =====
+  function resetSelect(el, holder='-- เลือก --'){
+    el.innerHTML = '';
+    el.append(new Option(holder, ''));
     el.disabled = true;
-    fill(el, [], true, programValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาวิชาก่อน --');
-    if (!programValue) return;
-    try {
-      const res = await fetch(`${endpoint}?ajax=groups_by_program&program=${encodeURIComponent(programValue)}`);
-      if (!res.ok) throw new Error(`โหลด groups ล้มเหลว (${res.status})`);
-      const data = await res.json();
-      fill(el, data.groups, true, '-- เลือกกลุ่มเรียน --');
-      el.disabled = false;
-    } catch (e) { console.error('Failed to load groups:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
-  };
+  }
+  function fillSelect(el, arr, holder='-- เลือก --'){
+    resetSelect(el, holder);
+    (arr || []).forEach(x => el.append(new Option(String(x), String(x))));
+    el.disabled = (arr || []).length === 0;
+  }
 
-  const loadPrograms = async (majorValue) => {
-    const el = document.getElementById('program');
-    el.disabled = true;
-    fill(el, [], true, majorValue ? ' กำลังโหลด...' : '-- โปรดเลือกสาขาก่อน --');
-    await loadGroups('');
-    if (!majorValue) return;
-    try {
-      const res = await fetch(`${endpoint}?ajax=programs_by_major&major=${encodeURIComponent(majorValue)}`);
-      if (!res.ok) throw new Error(`โหลด programs ล้มเหลว (${res.status})`);
-      const data = await res.json();
-      fill(el, data.programs, true, '-- เลือกสาขาวิชา --');
-      el.disabled = false;
-    } catch (e) { console.error('Failed to load programs:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
-  };
+  // ===== JSON fetch (ภายในไฟล์นี้เอง) =====
+  async function jget(url){
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  }
 
-  const loadMajors = async (facultyValue) => {
-    const el = document.getElementById('major');
-    el.disabled = true;
-    fill(el, [], true, facultyValue ? ' กำลังโหลด...' : '-- โปรดเลือกคณะก่อน --');
-    await loadPrograms('');
-    if (!facultyValue) return;
-    try {
-      const res = await fetch(`${endpoint}?ajax=majors_by_faculty&faculty=${encodeURIComponent(facultyValue)}`);
-      if (!res.ok) throw new Error(`โหลด majors ล้มเหลว (${res.status})`);
-      const data = await res.json();
-      fill(el, data.majors, true, '-- เลือกสาขา --');
-      el.disabled = false;
-    } catch (e) { console.error('Failed to load majors:', e); fill(el, [], true, ' โหลดผิดพลาด'); }
-  };
+  async function loadMajorsByFacultyLabel(facultyLabel){
+    resetSelect(majorEl, facultyLabel ? ' กำลังโหลด...' : ' โปรดเลือกคณะก่อน ');
+    resetSelect(programEl, ' โปรดเลือกสาขาก่อน ');
+    resetSelect(groupEl,   ' โปรดเลือกสาขาวิชาก่อน ');
+    if (!facultyLabel) return;
+    const list = await jget(`register.php?json=majors&faculty=${encodeURIComponent(facultyLabel)}`);
+    fillSelect(majorEl, list, ' เลือกสาขา ');
+  }
+  async function loadProgramsByMajorLabel(majorLabel){
+    resetSelect(programEl, majorLabel ? ' กำลังโหลด...' : ' โปรดเลือกสาขาก่อน ');
+    resetSelect(groupEl,   ' โปรดเลือกสาขาวิชาก่อน ');
+    if (!majorLabel) return;
+    const list = await jget(`register.php?json=programs&major=${encodeURIComponent(majorLabel)}`);
+    fillSelect(programEl, list, 'เลือกสาขาวิชา ');
+  }
+  async function loadGroupsByProgramLabel(programLabel){
+    resetSelect(groupEl, programLabel ? ' กำลังโหลด...' : ' โปรดเลือกสาขาวิชาก่อน ');
+    if (!programLabel) return;
+    const list = await jget(`register.php?json=groups&program=${encodeURIComponent(programLabel)}`);
+    fillSelect(groupEl, list, ' เลือกกลุ่มเรียน ');
+  }
 
-  const initForm = async () => {
+  async function initMeta(){
     submitBtn.disabled = true;
-    const original = submitBtn.innerHTML;
+    const saved = submitBtn.innerHTML;
     submitBtn.innerHTML = ' กำลังโหลดข้อมูล...';
-    try {
-      const res = await fetch(`${endpoint}?ajax=meta`);
-      if (!res.ok) throw new Error(`ไม่สามารถโหลดข้อมูลตัวเลือกได้ (${res.status})`);
-      const meta = await res.json();
-      fill(facEl, meta.faculties);
-      fill(document.getElementById('education_level'), meta.levels);
-      fill(document.getElementById('program_type'), meta.ptypes);
-      fill(document.getElementById('curriculum_name'), meta.curnames);
-      fill(document.getElementById('curriculum_year'), meta.curyears, false);
-      fill(document.getElementById('education_term'), meta.terms);
-      await loadMajors('');
-    } catch (error) {
-      console.error(error);
-      submitBtn.textContent = ' เกิดข้อผิดพลาด';
-      return;
-    } finally {
+    try{
+      const meta = await jget('register.php?json=meta');
+      fillSelect(facEl, meta.faculties, ' เลือกคณะ ');
+      fillSelect(document.getElementById('education_level'), meta.levels, ' เลือกระดับการศึกษา ');
+      fillSelect(document.getElementById('program_type'),    meta.ptypes, ' เลือกประเภทหลักสูตร ');
+      fillSelect(document.getElementById('curriculum_name'), meta.curnames, ' เลือกหลักสูตร ');
+      fillSelect(document.getElementById('curriculum_year'), meta.curyears, ' เลือกปีหลักสูตร ');
+      fillSelect(document.getElementById('education_term'),  meta.terms, ' เลือกภาคการศึกษา ');
+      // chain เริ่ม
+      resetSelect(majorEl,  ' โปรดเลือกคณะก่อน ');
+      resetSelect(programEl,' โปรดเลือกสาขาก่อน ');
+      resetSelect(groupEl,  ' โปรดเลือกสาขาวิชาก่อน ');
+    }catch(err){
+      console.error(err);
+      submitBtn.textContent = ' โหลดข้อมูลผิดพลาด';
+    }finally{
       submitBtn.disabled = false;
-      submitBtn.innerHTML = original;
+      submitBtn.innerHTML = saved;
     }
-  };
+  }
 
-  facEl.addEventListener('change', (e) => loadMajors(e.target.value));
-  majorEl.addEventListener('change', (e) => loadPrograms(e.target.value));
-  programEl.addEventListener('change', (e) => loadGroups(e.target.value));
+  // events
+  facEl.addEventListener('change',  () => loadMajorsByFacultyLabel(facEl.value));
+  majorEl.addEventListener('change',() => loadProgramsByMajorLabel(majorEl.value));
+  programEl.addEventListener('change',() => loadGroupsByProgramLabel(programEl.value));
 
   document.getElementById('regForm').addEventListener('submit', (ev) => {
     if (pw.value.length < 8) { ev.preventDefault(); alert('รหัสผ่านควรยาวอย่างน้อย 8 ตัวอักษร'); return; }
     if (pw.value !== pw2.value) { ev.preventDefault(); alert('รหัสผ่านและยืนยันรหัสผ่านไม่ตรงกัน'); }
   });
 
-  await initForm();
+  await initMeta();
 });
 
 function togglePasswordVisibility(id, el) {

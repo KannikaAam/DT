@@ -190,10 +190,10 @@ if ($user_type === 'teacher') {
 }
 
 // ---------- GET ----------
-// ล็อกอินแล้ว เด้งตามสิทธิ์; ยังไม่ล็อกอินกลับหน้าแรก
 if (!empty($_SESSION['loggedin'])) {
   $t = $_SESSION['user_type'] ?? '';
-  $to = ($t==='admin') ? 'index.php' : (($t==='teacher') ? 'teacher.php' : 'student_dashboard.php');
+  $to = ($t==='admin') ? 'admin_dashboard.php'
+       : (($t==='teacher') ? 'teacher.php' : 'student_dashboard.php');
   header("Location: $to"); exit;
 }
 header("Location: index.php"); exit;
