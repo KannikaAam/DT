@@ -21,10 +21,10 @@ if (empty($_SESSION['csrf_token'])) {
 $csrf = $_SESSION['csrf_token'];
 
 /* ===== Config ===== */
-define('DEFAULT_RESET_PASSWORD', '123456'); // << ค่ารีเซ็ตเริ่มต้น
+define('DEFAULT_RESET_PASSWORD', '123456');
 
 /* ===== DB ===== */
-require_once __DIR__ . '/db_connect.php'; // ควรให้ $conn = new mysqli(...)
+require_once __DIR__ . '/db_connect.php'; 
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 if (isset($conn) && $conn instanceof mysqli) { $conn->set_charset('utf8mb4'); }
 
@@ -44,7 +44,7 @@ try {
                       ADD COLUMN status ENUM('active','inactive') NOT NULL DEFAULT 'active' AFTER role");
     }
 } catch (Throwable $e) {
-    // ไม่ทำอะไร ปล่อยให้หน้าใช้งานต่อ (กรณีสิทธิ์ ALTER ไม่มี)
+   
 }
 
 /* ===== Helpers ===== */

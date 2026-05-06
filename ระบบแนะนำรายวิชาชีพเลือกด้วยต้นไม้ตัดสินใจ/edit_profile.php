@@ -1,8 +1,5 @@
 <?php
-/* edit_profile.php — Light theme + Upload + Dropdown แบบไดนามิก
-   JSON: ?json=meta|majors|programs|groups|curricula
-   ใช้: personal_info, education_info, form_options
-*/
+
 ini_set('display_errors',1); ini_set('display_startup_errors',1); error_reporting(E_ALL);
 session_start();
 
@@ -30,7 +27,7 @@ function be_from_input($y){
   if ($y==='') return '';
   if (!ctype_digit($y) || strlen($y)!==4) return '';
   $n = (int)$y;
-  if ($n < 2400) $n += 543; // ถ้าเป็น ค.ศ. → แปลงเป็น พ.ศ.
+  if ($n < 2400) $n += 543;
   return (string)$n;
 }
 
@@ -54,8 +51,7 @@ if (isset($_GET['json']) && $_GET['json']!=='') {
         'faculties' => $labels_by_type($conn,'faculty'),
         'levels'    => $labels_by_type($conn,'education_level'),
         'ptypes'    => $labels_by_type($conn,'program_type'),
-        'terms'     => $labels_by_type($conn,'education_term'), // ดึงจากฐานข้อมูลเท่านั้น
-        'curnames'  => $labels_by_type($conn,'curriculum_name'),
+        'terms'     => $labels_by_type($conn,'education_term'),
         'curyears'  => $labels_by_type($conn,'curriculum_year'),
         'eduyears'  => $labels_by_type($conn,'education_year'),
       ], JSON_UNESCAPED_UNICODE); exit;
@@ -496,11 +492,11 @@ async function bootstrapMeta(){
   fillSelect(selEduLevel, meta.levels, '— เลือกระดับการศึกษา —');
   fillSelect(selProgType, meta.ptypes, '— เลือกประเภทหลักสูตร —');
 
-  // ภาคการศึกษา: ใช้ตามที่ลงทะเบียนในฐานข้อมูลเท่านั้น (ไม่เติมเอง ไม่ normalize)
+  // ภาคการศึกษา: ใช้ตามที่ลงทะเบียนในฐานข้อมูลเท่านั้น
   const terms = Array.isArray(meta.terms) ? meta.terms.slice() : [];
   fillSelect(selTerm, terms, '— เลือกภาคการศึกษา —');
 
-  // ปีการศึกษา (พ.ศ.) — ถ้าฐานไม่มีเลย ค่อยสร้าง fallback ช่วงปี
+  // ปีการศึกษา (พ.ศ.)
   let eduyears = Array.isArray(meta.eduyears) ? meta.eduyears.slice() : [];
   if (eduyears.length===0){
     const now = new Date(); const ce = now.getUTCFullYear(); const be = ce + 543;
@@ -553,7 +549,7 @@ async function onProgramChange(initial=false){
   selMajor.addEventListener('change',   ()=> onMajorChange(false));
   selProgram.addEventListener('change', ()=> onProgramChange(false));
 
-  // ===== Instant preview ของรูปโปรไฟล์ (เพิ่มตรงนี้) =====
+  // ===== รูปโปรไฟล์ =====
   const fileInput = document.getElementById('profile_picture');
   const preview   = document.getElementById('profile-preview');
   if (fileInput && preview) {

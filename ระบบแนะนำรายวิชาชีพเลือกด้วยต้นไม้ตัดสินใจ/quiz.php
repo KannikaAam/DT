@@ -432,22 +432,22 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
     );
 
     if ($ASK_Q2_Q32) {
-        goto_q(2); // ถามต่อ กลุ่ม 1 ข้อ 2 (แก้ไขจาก Q14)
+        goto_q(2); 
     } else {
-        // เงื่อนไขอื่นๆ ทั้งหมด -> แนะนำกลุ่ม 3
+     
         $RESULT_GROUP = save_and_prepare_result($pdo, $STUDENT_ID, 3);
         $SHOW_RESULT=true;
     }
   }
 
-  // Q33: ตรรกะการแนะนำกลุ่ม 3 หรือถามต่อ Q2 (กลุ่ม 1)
+
   if (!$SHOW_RESULT && $qid==33) {
-    // เงื่อนไข Ask Q2 (พบ 8 เส้นทางที่ Q33=N/Y -> ถามต่อ Q2)
+    
     $ASK_Q2_Q33 = (
-      // Q33=Y -> ถามต่อ (2 เส้นทาง)
+   
       a(33,1) && (
-        (a(25,1) && a(26,0) && a(29,0) && a(31,0)) || // Q25=Y, Q26=N, Q29=N, Q31=N, Q33=Y
-        (a(25,0) && a(27,0) && a(29,0) && a(31,0))    // Q25=N, Q27=N, Q29=N, Q31=N, Q33=Y (รวมถึงกรณี N ทั้งหมดตามที่คุณระบุ)
+        (a(25,1) && a(26,0) && a(29,0) && a(31,0)) || 
+        (a(25,0) && a(27,0) && a(29,0) && a(31,0))    
       )
     ) || (
       // Q33=N -> ถามต่อ (6 เส้นทาง)
@@ -577,32 +577,32 @@ elseif (isset($_GET['qid'])) {
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{--g1:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--g2:linear-gradient(135deg,#4facfe 0%,#00f2fe 100%);--g3:linear-gradient(135deg,#fa709a 0%,#fee140 100%);--r:20px;--r2:12px}
-body{font-family:'Sarabun',sans-serif;background:var(--g1);min-height:100vh;padding:20px;line-height:1.6}
-.container{max-width:900px;margin:0 auto}
-.card{background:rgba(255,255,255,.95);backdrop-filter:blur(14px);border-radius:var(--r);padding:36px;border:1px solid rgba(255,255,255,.2);box-shadow:0 16px 40px rgba(0,0,0,.1)}
-.header{text-align:center;margin-bottom:28px}
-.title{font-size:2rem;font-weight:700;background:var(--g1);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.pills{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:10px}
-.pill{background:#eef2ff;border:1px solid #e5e7eb;border-radius:999px;padding:8px 14px;font-weight:600}
-.pill.warn{background:#fef3c7}
-.btns{text-align:center;margin-top:18px}
-.btn{display:inline-flex;align-items:center;gap:8px;padding:14px 26px;border-radius:12px;border:0;cursor:pointer;text-decoration:none;margin:0 6px}
-.btn-primary{background:var(--g1);color:#fff}
-.btn-outline{background:#fff;border:2px solid #e5e7eb}
-.btn-success{background:var(--g2);color:#fff}
-.qtext{font-size:1.2rem;background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-left:5px solid #3b82f6;border-radius:12px;padding:18px;margin-bottom:20px}
-.opts{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-bottom:20px}
-.opt input{position:absolute;opacity:0}
-.opt label{display:flex;align-items:center;gap:10px;padding:14px 24px;border:2px solid #e5e7eb;border-radius:12px;background:#fff;cursor:pointer}
-.opt input:checked+label{background:var(--g1);color:#fff;border-color:#3b82f6}
-.result-title{font-size:1.8rem;font-weight:700;margin-bottom:10px;text-align:center}
-.result-group{display:inline-block;background:var(--g2);color:#fff;border-radius:24px;padding:12px 20px;margin:10px 0}
-.subjects{background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:12px;padding:20px;margin:18px 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;list-style:none}
-.item{background:#fff;border-left:4px solid #3b82f6;border-radius:8px;padding:10px}
-@media (max-width:768px){.card{padding:24px}}
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--g1:linear-gradient(135deg,#667eea 0%,#764ba2 100%);--g2:linear-gradient(135deg,#4facfe 0%,#00f2fe 100%);--g3:linear-gradient(135deg,#fa709a 0%,#fee140 100%);--r:20px;--r2:12px}
+  body{font-family:'Sarabun',sans-serif;background:var(--g1);min-height:100vh;padding:20px;line-height:1.6}
+  .container{max-width:900px;margin:0 auto}
+  .card{background:rgba(255,255,255,.95);backdrop-filter:blur(14px);border-radius:var(--r);padding:36px;border:1px solid rgba(255,255,255,.2);box-shadow:0 16px 40px rgba(0,0,0,.1)}
+  .header{text-align:center;margin-bottom:28px}
+  .title{font-size:2rem;font-weight:700;background:var(--g1);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .pills{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:10px}
+  .pill{background:#eef2ff;border:1px solid #e5e7eb;border-radius:999px;padding:8px 14px;font-weight:600}
+  .pill.warn{background:#fef3c7}
+  .btns{text-align:center;margin-top:18px}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:14px 26px;border-radius:12px;border:0;cursor:pointer;text-decoration:none;margin:0 6px}
+  .btn-primary{background:var(--g1);color:#fff}
+  .btn-outline{background:#fff;border:2px solid #e5e7eb}
+  .btn-success{background:var(--g2);color:#fff}
+  .qtext{font-size:1.2rem;background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-left:5px solid #3b82f6;border-radius:12px;padding:18px;margin-bottom:20px}
+  .opts{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-bottom:20px}
+  .opt input{position:absolute;opacity:0}
+  .opt label{display:flex;align-items:center;gap:10px;padding:14px 24px;border:2px solid #e5e7eb;border-radius:12px;background:#fff;cursor:pointer}
+  .opt input:checked+label{background:var(--g1);color:#fff;border-color:#3b82f6}
+  .result-title{font-size:1.8rem;font-weight:700;margin-bottom:10px;text-align:center}
+  .result-group{display:inline-block;background:var(--g2);color:#fff;border-radius:24px;padding:12px 20px;margin:10px 0}
+  .subjects{background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:12px;padding:20px;margin:18px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;list-style:none}
+  .item{background:#fff;border-left:4px solid #3b82f6;border-radius:8px;padding:10px}
+  @media (max-width:768px){.card{padding:24px}}
 </style>
 </head>
 <body>

@@ -912,7 +912,7 @@ function getTotalStudents() {
 function getCompletedTestStudents() {
     global $conn;
 
-    // สมมติว่ามีตารางชื่อ 'student_quiz_results'
+    //  'student_quiz_results'
     $sql = "SELECT COUNT(DISTINCT student_id) AS completed FROM student_quiz_results WHERE status = 'completed'";
     $result = $conn->query($sql);
 

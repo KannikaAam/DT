@@ -562,7 +562,7 @@ if (!empty($student_data['profile_picture']) && file_exists('uploads/profile_ima
                 แก้ไขข้อมูลส่วนตัว
             </a>
             <a href="history.php" class="btn btn-warning">
-                ประวัติการใช้งาน
+                ประวัติการทำแบบทดสอบ
             </a>
             <a href="quiz.php" class="btn btn-info">
                 ทำแบบทดสอบ
